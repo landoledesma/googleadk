@@ -24,6 +24,8 @@ venv.dist/
 # Editor directories and files
 .vscode/
 .idea/
+.idx/
+.idx
 *.sublime-project
 *.sublime-workspace
 
@@ -86,4 +88,5 @@ __pypackages__/
 !/.git-filter-repo/
 
 # Docker
-Dockerfile.lock
+Dockerfile.lockcredentials.json
+credentials.json
