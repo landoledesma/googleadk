@@ -1,3 +1,41 @@
+# main.py
+
+import os
+import json
+import base64
+import asyncio
+import logging
+
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import PlainTextResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.websockets import WebSocketState # Asegúrate que esté importado
+from dotenv import load_dotenv # Solo para desarrollo local
+from pydantic import BaseModel
+
+# Dependencias de Google Cloud y ADK
+from google.cloud import secretmanager
+from google.adk.sessions.in_memory_session_service import InMemorySessionService
+from google.adk.agents.run_config import RunConfig
+from google.adk.agents import LiveRequestQueue
+from google.adk.runners import Runner
+# Mantenemos la importación por si es necesaria en tools o agent, pero no la usamos directamente aquí para SpeechConfig
+from google.generativeai import types as generativelanguage_types
+import google.generativeai as genai
+
+# Dependencias de Google Calendar
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleAuthRequest # Renombrado para evitar colisión
+import googleapiclient.discovery
+
+# Agente Jarvis
+try:
+    # Asumiendo que main.py está en app/ y jarvis está en app/jarvis/
+    from app.jarvis.agent import root_agent
+except ImportError:
+    root_agent = None
+    logging.error("No se pudo importar root_agent desde jarvis.agent. La funcionalidad de voz no funcionará.")
+
 # Twilio
 from twilio.twiml.voice_response import VoiceResponse, Start
 
@@ -357,4 +395,3 @@ if __name__ == "__main__":
     if not os.getenv("K_SERVICE"): load_dotenv()
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
-
