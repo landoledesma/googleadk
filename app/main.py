@@ -93,7 +93,7 @@ def configure_global_services():
     # TODO: Configurar un SessionService persistente para producción (ej. Firestore, Cloud Memorystore).
     # from google.adk.sessions.firestore_session_service import FirestoreSessionService
     # Runner.config_session_service(FirestoreSessionService(project_id=project_id))
-    Runner.config_session_service(InMemorySessionService()) # Para desarrollo
+    # Runner.config_session_service(InMemorySessionService()) # Para desarrollo
     logger.info("Session service configurado para usar InMemorySessionService (desarrollo).")
 
 # Llama a la función para configurar servicios al iniciar la aplicación.
@@ -301,6 +301,7 @@ async def run_agent(project_id: str, location_id: str, agent_id: str, request: R
 
         # Si se necesita devolver una estructura JSON específica:
         # return {"output": output_text, "other_fields": "values"}
+
 
         # Para compatibilidad con el ADK Test Client que espera PlainTextResponse:
         return PlainTextResponse(content=output_text)
