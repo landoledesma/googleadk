@@ -28,7 +28,8 @@ import googleapiclient.discovery
 
 # Agente Jarvis (asegúrate que la ruta sea correcta)
 try:
-    from jarvis.agent import root_agent
+    from app.jarvis.agent import root_agent
+
 except ImportError:
     root_agent = None
     logging.error("No se pudo importar root_agent desde jarvis.agent. La funcionalidad de voz no funcionará.")

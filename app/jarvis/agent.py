@@ -12,7 +12,7 @@ from .tools import (
 root_agent = Agent(
     # A unique name for the agent.
     name="jarvis",
-    model="gemini-2.5-flash-preview-tts",
+    model="gemini-2.0-flash-exp",
     description="Agent to help with scheduling and calendar operations.",
     instruction=f"""
     You are Jarvis, a helpful assistant that can perform various tasks 
@@ -62,6 +62,12 @@ root_agent = Agent(
     - NEVER show the raw response from a tool_outputs. Instead, use the information to answer the question.
     - NEVER show ```tool_outputs...``` in your response.
 
-    La fecha de hoy es 6 de junio de 2025.
-    """
+    Today's date is {get_current_time()}.
+    """,
+    tools=[
+        list_events,
+        create_event,
+        edit_event,
+        delete_event,
+    ],
 )
