@@ -1,12 +1,12 @@
 google-adk==0.5.0
-google-genai==1.14.0
+google-generativeai
 google-api-python-client>=2.169.0
 google-auth>=2.40.1
 annotated-types==0.7.0
 anyio==4.9.0
 Authlib==1.5.2
 cachetools==5.5.2
-certifi==2025.4.26
+certifi
 cffi==1.17.1
 charset-normalizer==3.4.2
 click==8.2.0
@@ -14,10 +14,7 @@ cryptography==44.0.3
 Deprecated==1.2.18
 docstring_parser==0.16
 fastapi==0.115.12
-google-adk==0.5.0
 google-api-core==2.24.2
-google-api-python-client==2.169.0
-google-auth==2.40.1
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.2
 google-cloud-aiplatform==1.92.0
@@ -29,7 +26,6 @@ google-cloud-speech==2.32.0
 google-cloud-storage==2.19.0
 google-cloud-trace==1.16.1
 google-crc32c==1.7.1
-google-genai==1.14.0
 google-resumable-media==2.7.2
 googleapis-common-protos==1.70.0
 graphviz==0.20.3
@@ -83,9 +79,6 @@ uvicorn==0.34.2
 websockets==15.0.1
 wrapt==1.17.2
 zipp==3.21.0
-
-# ... (tus dependencias existentes como fastapi, uvicorn, google-ai-generativelanguage, etc.)
-google-cloud-texttospeech # Aunque ADK genera audio, podríamos necesitarlo para TTS simple o como referencia
+google-cloud-texttospeech
 twilio
 pydub
-python-dotenv # Si aún no la tienes
