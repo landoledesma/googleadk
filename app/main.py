@@ -357,12 +357,4 @@ if __name__ == "__main__":
     if not os.getenv("K_SERVICE"): load_dotenv()
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
-Use code with caution.
-Python
-Mensaje de Commit Sugerido:
-Fix: Corrige errores de AttributeError en ADK Runner y configuración de audio
 
-- Simplifica RunConfig en start_agent_session para voz, eliminando el uso explícito de SpeechConfig y OutputAudioConfig que causaban AttributeError.
-- Elimina la llamada a `runner.run_query` de `start_agent_session` ya que no es apropiada para iniciar un stream en vivo.
-- Asegura que la importación de `root_agent` sea relativa al paquete `app` si `main.py` reside en `app/`. (Nota: se mantuvo `from jarvis.agent` asumiendo la estructura corregida).
-- `start_agent_session` ya no es `async` después de eliminar `await runner.run_query`.
