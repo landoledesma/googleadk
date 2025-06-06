@@ -217,8 +217,8 @@ if root_agent: # Solo definir estos endpoints si el root_agent se importó corre
             logger.info(f"Iniciando stream hacia: {websocket_url}")
             start.stream(url=websocket_url)
             response.append(start)
-            # response.say(message="Hola, estás hablando con el asistente virtual de Gemini. Por favor, hable después del tono.", voice="alice", language="es-ES") # Initial prompt will handle this
-            # response.pause(length=1)
+            response.say(message="Hola, estás hablando con el asistente virtual de Gemini. Por favor, hable después del tono.", voice="alice", language="es-ES") # Initial prompt will handle this
+            response.pause(length=1)
             return PlainTextResponse(str(response), media_type="application/xml")
         except Exception as e:
             logger.error(f"Error en /voice webhook: {e}", exc_info=True)
