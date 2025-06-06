@@ -9,6 +9,7 @@ import logging
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.websockets import WebSocketState # Added import
 from dotenv import load_dotenv # Solo para desarrollo local
 from pydantic import BaseModel
 
@@ -52,6 +53,13 @@ APP_NAME = "Twilio Voice Agent Gemini" # Nombre de la aplicación para ADK
 google_calendar_creds = None
 google_calendar_service = None
 gemini_api_key_loaded = False
+
+# Este es un chunk de 200ms de silencio en audio mu-law 8kHz (estándar de Twilio).
+# Se puede usar un WAV convertido a mu-law con sox o ffmpeg.
+# Te dejo uno codificado en base64 para usar como ejemplo:
+SILENCE_PAYLOAD = (
+    "Qk2uAAAAAAAAADYAAAAoAAAAAAAoAAACAAAAAAAAAAAAAAQAAAAEAAAABAAAAAAAAAAAAAAAAAAAAAAAA"
+)
 
 def get_project_id_for_secrets():
     effective_project_id = GCP_PROJECT_ID_ENV
@@ -165,6 +173,26 @@ async def startup_event():
 # SECCIÓN DE VOZ CON TWILIO Y GEMINI ADK
 # ================================================
 
+active_streams_sids = {} # Moved here to be accessible by send_keepalive
+
+async def send_keepalive(websocket: WebSocket, call_sid: str):
+    try:
+        while True:
+            stream_sid = active_streams_sids.get(call_sid)
+            if stream_sid:
+                keepalive_message = {
+                    "event": "media",
+                    "streamSid": stream_sid,
+                    "media": {"payload": SILENCE_PAYLOAD}
+                }
+                await websocket.send_json(keepalive_message)
+                logger.debug(f"Enviado keep-alive de silencio para {call_sid}")
+            await asyncio.sleep(5)  # Cada 5 segundos
+    except asyncio.CancelledError:
+        logger.info(f"Tarea keep-alive cancelada para {call_sid}")
+    except Exception as e:
+        logger.error(f"Error en tarea keep-alive para {call_sid}: {e}", exc_info=True)
+
 if root_agent: # Solo definir estos endpoints si el root_agent se importó correctamente
     @app.post("/voice", response_class=PlainTextResponse)
     async def voice_webhook(request: Request):
@@ -189,8 +217,8 @@ if root_agent: # Solo definir estos endpoints si el root_agent se importó corre
             logger.info(f"Iniciando stream hacia: {websocket_url}")
             start.stream(url=websocket_url)
             response.append(start)
-            response.say(message="Hola, estás hablando con el asistente virtual de Gemini. Por favor, hable después del tono.", voice="alice", language="es-ES")
-            response.pause(length=1)
+            # response.say(message="Hola, estás hablando con el asistente virtual de Gemini. Por favor, hable después del tono.", voice="alice", language="es-ES") # Initial prompt will handle this
+            # response.pause(length=1)
             return PlainTextResponse(str(response), media_type="application/xml")
         except Exception as e:
             logger.error(f"Error en /voice webhook: {e}", exc_info=True)
@@ -198,36 +226,47 @@ if root_agent: # Solo definir estos endpoints si el root_agent se importó corre
             error_response.say("Lo sentimos, ha ocurrido un error al procesar su llamada.", language="es-ES")
             return PlainTextResponse(str(error_response), media_type="application/xml", status_code=500)
 
-    def start_agent_session(session_id: str):
+    # def start_agent_session(session_id: str): # Changed to async
+    async def start_agent_session(session_id: str):
         logger.info(f"Iniciando sesión Gemini ADK para session_id: {session_id}")
-        # Aquí session_service es la instancia global
         session = session_service.create_session(
             app_name=APP_NAME, user_id=session_id, session_id=session_id,
         )
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
+        # Mandar un mensaje inicial (opcional pero recomendado)
+        initial_prompt = "Hola, soy el asistente virtual de Gemini. ¿En qué puedo ayudarte hoy?"
+        try:
+            # Nota: run_query devuelve una lista de partes de respuesta
+            run_config_initial = RunConfig(response_modalities=["AUDIO", "TEXT"]) # Needs audio for initial twilio response
+            # Adaptado para usar await en lugar de asyncio.run
+            response = await runner.run_query(session=session, query=initial_prompt, run_config=run_config_initial)
+            logger.info(f"Respuesta inicial de Gemini generada: {response}")
+        except Exception as e:
+            logger.error(f"Error generando respuesta inicial de Gemini: {e}", exc_info=True)
+
+
         speech_config = generativelanguage_types.SpeechConfig(
             voice_config=generativelanguage_types.VoiceConfig(
-                prebuilt_voice_config=generativelanguage_types.PrebuiltVoiceConfig(voice_name="Puck") # Asegúrate que "Puck" exista o elige otra
+                prebuilt_voice_config=generativelanguage_types.PrebuiltVoiceConfig(voice_name="Puck")
             )
         )
         output_audio_config = generativelanguage_types.OutputAudioConfig(
             audio_encoding="OUTPUT_AUDIO_ENCODING_LINEAR_16",
             sample_rate_hertz=8000,
         )
-        run_config = RunConfig(
+        run_config_live = RunConfig( # Renamed to avoid conflict
             response_modalities=["AUDIO", "TEXT"],
             speech_config=speech_config,
             output_audio_config=output_audio_config,
         )
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(
-            session=session, live_request_queue=live_request_queue, run_config=run_config,
+            session=session, live_request_queue=live_request_queue, run_config=run_config_live, # Use new run_config_live
         )
         logger.info(f"Sesión Gemini ADK y runner iniciados para {session_id}")
         return live_events, live_request_queue, session
 
-    active_streams_sids = {}
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
         try:
@@ -275,9 +314,13 @@ if root_agent: # Solo definir estos endpoints si el root_agent se importó corre
                 elif event_type == "media":
                     payload = message_json["media"]["payload"]
                     audio_data_raw = base64.b64decode(payload)
-                    blob_data = generativelanguage_types.Blob(data=audio_data_raw, mime_type="audio/x-mulaw") # Twilio usualmente envía mu-law
-                    live_request_queue.send_realtime(blob_data)
-                    logger.debug(f"🔊 Audio de Twilio enviado a Gemini para {call_sid}: {len(audio_data_raw)} bytes")
+                    # Asegurarse que live_request_queue esté disponible y no cerrado
+                    if live_request_queue and not live_request_queue.is_closed:
+                        blob_data = generativelanguage_types.Blob(data=audio_data_raw, mime_type="audio/x-mulaw") # Twilio usualmente envía mu-law
+                        live_request_queue.send_realtime(blob_data)
+                        logger.debug(f"🔊 Audio de Twilio enviado a Gemini para {call_sid}: {len(audio_data_raw)} bytes")
+                    else:
+                        logger.warning(f"live_request_queue no disponible o cerrada para {call_sid}. No se envía audio a Gemini.")
                 elif event_type == "stop":
                     logger.info(f"🔴 Fin del stream de Twilio para {call_sid}")
                     if live_request_queue and not live_request_queue.is_closed: live_request_queue.close()
@@ -298,32 +341,65 @@ if root_agent: # Solo definir estos endpoints si el root_agent se importó corre
         await websocket.accept()
         logger.info(f"🔗 Conexión WebSocket de audio aceptada para {call_sid}")
         live_events, live_request_queue, adk_session = None, None, None
+        keepalive_task = None # Initialize keepalive_task
+        twilio_task = None
+        gemini_task = None
         try:
-            if not gemini_api_key_loaded: # Verificar si la API key de Gemini está cargada
+            if not gemini_api_key_loaded: 
                 logger.error(f"API Key de Gemini no cargada. No se puede iniciar sesión ADK para {call_sid}.")
                 await websocket.close(code=1011, reason="Server configuration error: Gemini API Key not loaded")
                 return
-            if not google_calendar_service: # Verificar si el servicio de Calendar está inicializado
+            if not google_calendar_service: 
                 logger.error(f"Servicio de Google Calendar no inicializado. No se puede iniciar sesión ADK para {call_sid}.")
                 await websocket.close(code=1011, reason="Server configuration error: Calendar service not initialized")
                 return
 
-            live_events, live_request_queue, adk_session = start_agent_session(call_sid)
+            # live_events, live_request_queue, adk_session = start_agent_session(call_sid) # Changed to await
+            live_events, live_request_queue, adk_session = await start_agent_session(call_sid)
             
+            keepalive_task = asyncio.create_task(send_keepalive(websocket, call_sid)) # Create keepalive task
             twilio_task = asyncio.create_task(process_twilio_audio(websocket, call_sid, live_request_queue))
             gemini_task = asyncio.create_task(process_gemini_responses(websocket, call_sid, live_events))
             
-            await asyncio.gather(twilio_task, gemini_task)
+            # await asyncio.gather(twilio_task, gemini_task)
+            await asyncio.gather(twilio_task, gemini_task, keepalive_task) # Add keepalive_task to gather
+
         except Exception as e:
             logger.error(f"Error principal en WebSocket handler para {call_sid}: {e}", exc_info=True)
         finally:
             logger.info(f"🧹 Limpiando recursos para WebSocket {call_sid}")
+            if keepalive_task: # Cancel keepalive task
+                keepalive_task.cancel()
+            # Cancel other tasks explicitly before closing queue or session
+            if twilio_task and not twilio_task.done():
+                twilio_task.cancel()
+            if gemini_task and not gemini_task.done():
+                gemini_task.cancel()
+            
+            # Wait for tasks to finish cancellation
+            try:
+                if twilio_task: await twilio_task
+            except asyncio.CancelledError:
+                logger.info(f"Twilio task cancelada para {call_sid}")
+            try:
+                if gemini_task: await gemini_task
+            except asyncio.CancelledError:
+                logger.info(f"Gemini task cancelada para {call_sid}")
+            try:
+                if keepalive_task: await keepalive_task
+            except asyncio.CancelledError:
+                logger.info(f"Keepalive task cancelada para {call_sid}")
+
+
             if live_request_queue and not live_request_queue.is_closed: live_request_queue.close()
+            # Consider closing ADK session if applicable
+            # if adk_session: session_service.close_session(adk_session.session_id)
+
             if call_sid in active_streams_sids: del active_streams_sids[call_sid]
             try:
-                if websocket.client_state != WebSocketState.DISCONNECTED: # Solo cerrar si no está ya desconectado
-                    await websocket.close()
-            except RuntimeError: pass # Puede ocurrir si el socket ya está cerrado
+                if websocket.client_state != WebSocketState.DISCONNECTED:
+                    await websocket.close(code=1000) # Use code 1000 for normal closure
+            except RuntimeError: pass 
             except Exception as e_close: logger.error(f"Error al cerrar websocket para {call_sid}: {e_close}")
             logger.info(f"🔚 Conexión WebSocket de audio cerrada para {call_sid}")
 else:
@@ -338,18 +414,12 @@ class PromptRequest(BaseModel):
 @app.post("/chat")
 async def process_chat(request: PromptRequest):
     logger.info(f"Solicitud de chat recibida con el prompt: {request.prompt}")
-    # ... (Tu lógica existente para /chat, asegúrate que maneje la no disponibilidad de root_agent si es necesario)
-    # Esta ruta probablemente necesite su propia lógica de Runner y LiveRequestQueue si es para un agente diferente
-    # o si root_agent no es adecuado para texto simple. Por ahora, se deja como estaba.
-    if not root_agent or not gemini_api_key_loaded: # Asumiendo que /chat también usa el ADK y Gemini
+    if not root_agent or not gemini_api_key_loaded: 
         logger.error("Chat no disponible: root_agent o API Key de Gemini no configurados.")
         raise HTTPException(status_code=503, detail="Servicio de chat no disponible temporalmente.")
 
-    # Lógica de ejemplo para /chat usando root_agent (simplificado)
     try:
-        # Para un chat simple, no necesitamos un RunConfig tan complejo como el de voz
         run_config = RunConfig(response_modalities=["TEXT"])
-        # Necesitarás una sesión para el chat
         chat_session_id = f"chat_{os.urandom(8).hex()}"
         session = session_service.create_session(app_name=APP_NAME, user_id="chat_user", session_id=chat_session_id)
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
@@ -367,17 +437,12 @@ async def process_chat(request: PromptRequest):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("Cliente WebSocket /ws conectado.")
-    # ... (Tu lógica existente para /ws)
-    # Similar a /chat, esta ruta necesita su propia gestión de sesión y runner si usa el ADK.
-    # Por simplicidad, la dejo con un placeholder.
-    # Esto es un ejemplo muy básico, necesitarás una lógica de manejo de mensajes y respuestas más robusta.
     if not root_agent or not gemini_api_key_loaded:
         logger.error("WebSocket /ws no disponible: root_agent o API Key de Gemini no configurados.")
         await websocket.close(code=1011, reason="Servicio no disponible")
         return
 
-    # Ejemplo de cómo podría ser, muy simplificado
-    chat_session_id = f"ws_{os.urandom(8).hex()}" # Sesión única por conexión ws
+    chat_session_id = f"ws_{os.urandom(8).hex()}" 
     session = session_service.create_session(app_name=APP_NAME, user_id="ws_user", session_id=chat_session_id)
     runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
     run_config = RunConfig(response_modalities=["TEXT"])
@@ -395,23 +460,19 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Error en WebSocket /ws: {e}", exc_info=True)
         try:
-            await websocket.close(code=1011)
+            if websocket.client_state != WebSocketState.DISCONNECTED:
+                await websocket.close(code=1011)
         except RuntimeError: pass
     finally:
         logger.info("Conexión WebSocket /ws cerrada.")
 
 
 @app.post("/v1/projects/{project_id}/locations/{location_id}/agents/{agent_id}:run")
-async def run_agent_endpoint(project_id: str, location_id: str, agent_id: str, request: Request): # Renombrado para evitar colisión
-    # ... (Tu lógica existente para /run)
-    # Esta ruta también necesitaría su propia lógica de runner si usa el ADK.
-    # Se asume que esta ruta es para una interacción específica con un "Reasoning Engine" o similar.
-    # El código original se mantiene, pero se debe asegurar que root_agent esté disponible si lo usa.
+async def run_agent_endpoint(project_id: str, location_id: str, agent_id: str, request: Request): 
     logger.info(f"Solicitud /run: {project_id}/{location_id}/{agent_id}")
     if not root_agent or not gemini_api_key_loaded:
         logger.error("/run no disponible: root_agent o API Key de Gemini no configurados.")
         raise HTTPException(status_code=503, detail="Servicio /run no disponible temporalmente.")
-    # Tu código original para este endpoint, adaptado para usar root_agent si es necesario
     try:
         request_body_bytes = await request.body()
         if not request_body_bytes: raise HTTPException(status_code=400, detail="Cuerpo vacío")
@@ -420,17 +481,16 @@ async def run_agent_endpoint(project_id: str, location_id: str, agent_id: str, r
         prompt_text = data.get("prompt") or data.get("input")
         if not prompt_text: raise HTTPException(status_code=400, detail="Falta prompt/input")
         
-        # Asumiendo que esta ruta también usa el root_agent para una interacción simple de texto
         run_session_id = f"run_{os.urandom(8).hex()}"
         session = session_service.create_session(app_name=APP_NAME, user_id="run_user", session_id=run_session_id)
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
-        run_config = RunConfig(response_modalities=["TEXT"]) # Respuesta de texto simple
+        run_config = RunConfig(response_modalities=["TEXT"])
 
         response = await runner.run_query(session=session, query=prompt_text, run_config=run_config)
         output_text = "".join([part.text_data.text for part in response.parts if part.text_data])
         
         logger.info(f"Respuesta de /run: {output_text}")
-        return PlainTextResponse(content=output_text) # El ADK Test Client espera PlainText
+        return PlainTextResponse(content=output_text)
 
     except json.JSONDecodeError as jde:
         logger.error(f"Error JSON en /run: {jde}", exc_info=True)
@@ -460,15 +520,9 @@ async def health_check():
 # ================================================
 if __name__ == "__main__":
     logger.info("Iniciando servidor FastAPI localmente con Uvicorn en puerto 8000...")
-    # Para desarrollo local, asegúrate que las variables de .env se carguen
     if not os.getenv("K_SERVICE"):
         load_dotenv()
-        # Re-inicializar servicios si es necesario para local con .env
-        # No es estrictamente necesario si startup_event se dispara también localmente,
-        # pero es bueno para asegurar que .env se lea antes de la inicialización.
-        # initialize_global_services() # startup_event ya lo hace
     
     import uvicorn
-    # El puerto aquí debe coincidir con el EXPOSE y CMD del Dockerfile
-    # y la configuración del puerto del contenedor en Cloud Run.
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) # reload=True para desarrollo
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
+
