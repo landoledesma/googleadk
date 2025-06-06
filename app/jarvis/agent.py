@@ -63,11 +63,5 @@ root_agent = Agent(
     - NEVER show ```tool_outputs...``` in your response.
 
     La fecha de hoy es 6 de junio de 2025.
-    """,
-    tools=[
-        list_events,
-        create_event,
-        edit_event,
-        delete_event,
-    ],
+    """
 )
