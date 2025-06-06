@@ -231,34 +231,39 @@ if root_agent:
             while True:
                 message_json = await websocket.receive_json()
                 event_type = message_json.get("event")
+                # ... (tu lógica para connected, start) ...
                 if event_type == "connected": logger.info(f"🔌 WS conectado (Twilio) {call_sid}. Protocolo: {message_json.get('protocol')}")
                 elif event_type == "start":
                     stream_sid = message_json.get("streamSid")
                     active_streams_sids[call_sid] = stream_sid
                     logger.info(f"🎙️ Stream Twilio iniciado {call_sid}. streamSid: {stream_sid}")
-                    # Opcional: Enviar un prompt inicial a Gemini una vez que el stream de Twilio está listo
-                    # if live_request_queue and not live_request_queue.is_closed:
-                    #     initial_greeting_prompt = "El usuario ha conectado. Salúdalo y pregúntale en qué puedes ayudar."
-                    #     live_request_queue.send_request(initial_greeting_prompt) # Envía como texto
-                    #     logger.info(f"Prompt de saludo inicial enviado a Gemini para {call_sid}")
-
                 elif event_type == "media":
                     payload = message_json["media"]["payload"]
                     audio_data_raw = base64.b64decode(payload)
-                    if live_request_queue and not live_request_queue.is_closed:
+                    # Usar .closed y verificar que la cola exista
+                    if live_request_queue and not live_request_queue.closed: # <--- CAMBIO AQUÍ
                         blob_data = generativelanguage_types.Blob(data=audio_data_raw, mime_type="audio/x-mulaw")
                         live_request_queue.send_realtime(blob_data)
                         logger.debug(f"🔊 Audio Twilio a Gemini {call_sid}: {len(audio_data_raw)} bytes")
-                    else: logger.warning(f"live_request_queue no disponible/cerrada para {call_sid}.")
+                    else:
+                        logger.warning(f"live_request_queue cerrada o no disponible para {call_sid} al procesar media.")
                 elif event_type == "stop":
                     logger.info(f"🔴 Fin stream Twilio para {call_sid}")
-                    if live_request_queue and not live_request_queue.is_closed: live_request_queue.close()
+                    if live_request_queue and not live_request_queue.closed: # <--- CAMBIO AQUÍ
+                        try:
+                            logger.info(f"Cerrando live_request_queue en 'stop' para {call_sid}")
+                            live_request_queue.close()
+                        except Exception as e_close_stop: # Más genérico por si acaso
+                            logger.error(f"Error al cerrar live_request_queue en 'stop' para {call_sid}: {e_close_stop}")
                     break
+                # ... (tu lógica para mark) ...
                 elif event_type == "mark": logger.info(f"✅ Mark Twilio {call_sid}: {message_json.get('name')}")
-        except WebSocketDisconnect: logger.info(f"WS desconectado (Twilio) por Twilio para {call_sid}.")
-        except Exception as e: logger.error(f"Error en WS Twilio {call_sid}: {e}", exc_info=True)
+        except WebSocketDisconnect:
+            logger.info(f"WS desconectado (Twilio audio) por Twilio para {call_sid}.")
+        except Exception as e:
+            logger.error(f"Error en WS Twilio {call_sid}: {e}", exc_info=True)
         finally:
-            if live_request_queue and not live_request_queue.is_closed: live_request_queue.close()
+            # El cierre principal de la cola se hará en el finally del websocket_audio_endpoint
             logger.info(f"Fin procesamiento audio Twilio para {call_sid}.")
 
     @app.websocket("/stream/{call_sid}")
@@ -287,7 +292,6 @@ if root_agent:
             logger.error(f"Error principal en WS handler {call_sid}: {e}", exc_info=True)
         finally:
             logger.info(f"🧹 Limpiando WS {call_sid}")
-            # Cancelar tareas
             if twilio_task and not twilio_task.done(): twilio_task.cancel()
             if gemini_task and not gemini_task.done(): gemini_task.cancel()
             try:
@@ -297,7 +301,13 @@ if root_agent:
                 if gemini_task: await gemini_task
             except asyncio.CancelledError: logger.info(f"Gemini task cancelada {call_sid}")
 
-            if live_request_queue and not live_request_queue.is_closed: live_request_queue.close()
+            if live_request_queue and not live_request_queue.closed: # <--- CAMBIO AQUÍ
+                try:
+                    logger.info(f"Cerrando live_request_queue en finally de WS para {call_sid}")
+                    live_request_queue.close()
+                except Exception as e_q_close_final:
+                     logger.error(f"Error al cerrar live_request_queue en finally de WS para {call_sid}: {e_q_close_final}")
+
             if call_sid in active_streams_sids: del active_streams_sids[call_sid]
             try:
                 if websocket.client_state != WebSocketState.DISCONNECTED:

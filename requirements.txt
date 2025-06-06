@@ -1,4 +1,4 @@
-google-adk==0.5.0
+google-adk>=1.2.0
 google-generativeai
 google-api-python-client>=2.169.0
 google-auth>=2.40.1
