@@ -62,7 +62,7 @@ root_agent = Agent(
     - NEVER show the raw response from a tool_outputs. Instead, use the information to answer the question.
     - NEVER show ```tool_outputs...``` in your response.
 
-    Today's date is {get_current_time()}.
+    La fecha de hoy es 6 de junio de 2025.
     """,
     tools=[
         list_events,
