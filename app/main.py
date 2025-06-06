@@ -241,7 +241,7 @@ if root_agent:
                     payload = message_json["media"]["payload"]
                     audio_data_raw = base64.b64decode(payload)
                     # Usar .closed y verificar que la cola exista
-                    if live_request_queue and not live_request_queue.closed: # <--- CAMBIO AQUÍ
+                    if live_request_queue and not live_request_queue.close(): # <--- CAMBIO AQUÍ
                         blob_data = generativelanguage_types.Blob(data=audio_data_raw, mime_type="audio/x-mulaw")
                         live_request_queue.send_realtime(blob_data)
                         logger.debug(f"🔊 Audio Twilio a Gemini {call_sid}: {len(audio_data_raw)} bytes")
@@ -249,7 +249,7 @@ if root_agent:
                         logger.warning(f"live_request_queue cerrada o no disponible para {call_sid} al procesar media.")
                 elif event_type == "stop":
                     logger.info(f"🔴 Fin stream Twilio para {call_sid}")
-                    if live_request_queue and not live_request_queue.closed: # <--- CAMBIO AQUÍ
+                    if live_request_queue and not live_request_queue.close(): # <--- CAMBIO AQUÍ
                         try:
                             logger.info(f"Cerrando live_request_queue en 'stop' para {call_sid}")
                             live_request_queue.close()
@@ -301,7 +301,7 @@ if root_agent:
                 if gemini_task: await gemini_task
             except asyncio.CancelledError: logger.info(f"Gemini task cancelada {call_sid}")
 
-            if live_request_queue and not live_request_queue.closed: # <--- CAMBIO AQUÍ
+            if live_request_queue and not live_request_queue.close(): # <--- CAMBIO AQUÍ
                 try:
                     logger.info(f"Cerrando live_request_queue en finally de WS para {call_sid}")
                     live_request_queue.close()
