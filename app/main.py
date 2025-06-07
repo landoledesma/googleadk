@@ -1,11 +1,12 @@
 # main.py
-# VERSIÓN FINAL: Corregida para construir SpeechConfig y VoiceConfig correctamente.
+# VERSIÓN FINAL Y CORRECTA: Implementa la transcodificación de audio en tiempo real.
 
 import os
 import json
 import base64
 import asyncio
 import logging
+import io
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
@@ -14,19 +15,19 @@ from fastapi.websockets import WebSocketState
 from dotenv import load_dotenv
 
 # ================================================
-# --- SDK de Google y Dependencias del Agente ---
+# --- SDK de Google, ADK y Librerías de Audio ---
 # ================================================
 from google.genai import types as generativelanguage_types
-
 from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.agents import LiveRequestQueue
 from google.adk.runners import Runner
+from pydub import AudioSegment
 
 # Twilio
 from twilio.twiml.voice_response import VoiceResponse, Start
 
-# Agente Jarvis (Ajusta la ruta si es necesario)
+# Agente Jarvis
 try:
     from app.jarvis.agent import root_agent
 except ImportError:
@@ -86,20 +87,16 @@ if root_agent:
         session = session_service.create_session(app_name=APP_NAME, user_id=session_id, session_id=session_id)
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
-        # --- CONFIGURACIÓN FINAL Y CORRECTA PARA EVITAR EL 'ValidationError' ---
-        # 1. Se crea un `VoiceConfig` para especificar el formato del audio de SALIDA (la voz de Gemini).
-        #    Esto es lo que Pydantic espera, y es crucial para la compatibilidad con Twilio.
-        voice_config = generativelanguage_types.VoiceConfig(
-            audio_encoding="MULAW",
-            sample_rate_hertz=8000
-        )
-        
-        # 2. Se crea un `SpeechConfig` que envuelve al `VoiceConfig`.
+        # --- CONFIGURACIÓN FINAL Y CORRECTA ---
+        # 1. Se crea un `SpeechConfig` para solicitar a Gemini que genere audio.
+        #    Usamos una voz pre-construida. Gemini nos enviará audio PCM de alta calidad (24kHz).
         speech_config = generativelanguage_types.SpeechConfig(
-            voice_config=voice_config
+            voice_config=generativelanguage_types.VoiceConfig(
+                prebuilt_voice_config=generativelanguage_types.PrebuiltVoiceConfig(voice_name="Puck")
+            )
         )
         
-        # 3. Se construye el `RunConfig` usando los campos que realmente existen.
+        # 2. Se construye el `RunConfig` para habilitar entrada y salida de audio.
         run_config = RunConfig(
             response_modalities=["AUDIO", "TEXT"],
             speech_config=speech_config,
@@ -108,7 +105,7 @@ if root_agent:
         
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados con la estructura de configuración correcta.")
+        logger.info("Sesión ADK y runner iniciados. Preparado para transcodificar audio.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
@@ -116,7 +113,26 @@ if root_agent:
             async for event in live_events:
                 if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
                     if event.output_data and event.output_data.audio_data:
-                        payload = base64.b64encode(event.output_data.audio_data.data).decode("utf-8")
+                        # --- ¡TRANSCODIFICACIÓN DE AUDIO EN TIEMPO REAL! ---
+                        
+                        # 1. Audio de Gemini (PCM, 24kHz, 1 canal, 16-bit)
+                        gemini_audio_chunk = event.output_data.audio_data.data
+                        
+                        # 2. Cargar el audio PCM en pydub
+                        audio_segment = AudioSegment(
+                            data=gemini_audio_chunk,
+                            sample_width=2,  # 16-bit = 2 bytes
+                            frame_rate=24000,
+                            channels=1
+                        )
+                        
+                        # 3. Exportar a formato MULAW 8kHz
+                        buffer = io.BytesIO()
+                        audio_segment.export(buffer, format="mulaw", frame_rate=8000)
+                        twilio_audio_chunk = buffer.getvalue()
+                        
+                        # 4. Enviar el audio transcodificado a Twilio
+                        payload = base64.b64encode(twilio_audio_chunk).decode("utf-8")
                         stream_sid = active_streams_sids.get(call_sid)
                         if stream_sid:
                             await websocket.send_json({"event": "media", "streamSid": stream_sid, "media": {"payload": payload}})
