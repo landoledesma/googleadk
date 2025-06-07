@@ -85,7 +85,7 @@ if root_agent:
         run_config = RunConfig(
             response_modalities=["AUDIO", "TEXT"]
         )
-       
+        
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
         logger.info("Sesión ADK y runner iniciados con configuración mínima recomendada.")
@@ -143,7 +143,7 @@ if root_agent:
                 parts=[generativelanguage_types.Part(text="Saluda al usuario y preséntate como Jarvis.")]
             )
             live_request_queue.send_content(content=initial_content)
-           
+            
             twilio_task = asyncio.create_task(process_twilio_audio(websocket, call_sid, live_request_queue))
             gemini_task = asyncio.create_task(process_gemini_responses(websocket, call_sid, live_events))
             await asyncio.gather(twilio_task, gemini_task)
