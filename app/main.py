@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN FINAL: Simplificada al máximo para confiar en el modelo de audio nativo.
+# VERSIÓN FINAL: Mantiene el ADK y las herramientas, y usa la configuración mínima y más lógica para el modelo de audio nativo.
 
 import os
 import json
@@ -20,7 +20,7 @@ from google.adk.agents import LiveRequestQueue
 from google.adk.runners import Runner
 from twilio.twiml.voice_response import VoiceResponse, Start
 
-# Agente Jarvis (Asegúrate de que la ruta sea correcta)
+# Agente Jarvis (con herramientas)
 try:
     from app.jarvis.agent import root_agent
 except ImportError:
@@ -62,7 +62,7 @@ if root_agent:
             websocket_url = f"wss://{SERVER_BASE_URL.replace('https://', '')}/stream/{call_sid}"
             start = Start()
             start.stream(url=websocket_url)
-            # El agente saludará, no es necesario un mensaje aquí.
+            # El agente debe saludar, no se necesita un mensaje predefinido aquí.
             return PlainTextResponse(str(response), media_type="application/xml")
         except Exception as e:
             logger.error(f"Error en /voice: {e}", exc_info=True)
@@ -75,18 +75,18 @@ if root_agent:
         )
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
-        # --- CONFIGURACIÓN FINAL Y SIMPLIFICADA ---
-        # Al usar un modelo de audio nativo, no necesitamos especificar NINGUNA configuración de audio.
-        # El modelo ya sabe que debe aceptar y generar audio.
-        # Simplemente pedimos las modalidades de respuesta.
-        # Esto evita enviar un "argumento inválido" al backend de Google.
+        # --- HIPÓTESIS FINAL: LA CONFIGURACIÓN MÁS PURA ---
+        # 1. Le decimos que vamos a enviar audio, habilitando la transcripción de entrada.
+        # 2. NO le decimos nada sobre el audio de salida. Confiamos en que el modelo de audio nativo
+        #    ya sabe que su trabajo es generar audio, evitando así el "argumento inválido".
         run_config = RunConfig(
-            response_modalities=["AUDIO", "TEXT"]
+            response_modalities=["AUDIO", "TEXT"],
+            input_audio_transcription=generativelanguage_types.AudioTranscriptionConfig()
         )
         
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados para modelo de audio nativo.")
+        logger.info("Sesión ADK y runner iniciados con configuración mínima para agente de voz nativo.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
@@ -94,7 +94,7 @@ if root_agent:
             async for event in live_events:
                 if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
                     if event.output_data and event.output_data.audio_data:
-                        # El modelo de audio nativo debería devolver el audio en el formato correcto (MULAW).
+                        # El modelo nativo debería devolver MULAW directamente.
                         twilio_audio_chunk = event.output_data.audio_data.data
                         payload = base64.b64encode(twilio_audio_chunk).decode("utf-8")
                         stream_sid = active_streams_sids.get(call_sid)
@@ -117,6 +117,7 @@ if root_agent:
                     active_streams_sids[call_sid] = message_json.get("start", {}).get("streamSid")
                 elif event_type == "media":
                     if live_request_queue:
+                        # Enviamos el audio MULAW de Twilio directamente.
                         blob_data = generativelanguage_types.Blob(data=base64.b64decode(message_json["media"]["payload"]), mime_type="audio/x-mulaw")
                         live_request_queue.send_realtime(blob_data)
                 elif event_type == "stop":
