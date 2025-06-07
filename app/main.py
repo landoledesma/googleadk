@@ -1,18 +1,17 @@
 # main.py
-# VERSIÓN CON LOGGING DEBUG PARA ADK/GENAI Y RunConfig ACTUALIZADO
+# VERSIÓN CON RunConfig SIMPLIFICADO Y PASO DE SESIÓN AL ESTILO EJEMPLO ADK
 
 import os
 import json
 import base64
 import asyncio
-import logging # Mover logging aquí para configurar antes
+import logging
 import websockets
 import audioop
 
 # --- HABILITAR LOGGING DEBUG PARA LIBRERÍAS DE GOOGLE ---
-# Colocar esto ANTES de configurar tu logger principal
 logging.getLogger('google_adk').setLevel(logging.DEBUG)
-logging.getLogger('google.adk').setLevel(logging.DEBUG) # Para cubrir ambas nomenclaturas si es necesario
+logging.getLogger('google.adk').setLevel(logging.DEBUG)
 logging.getLogger('google.genai').setLevel(logging.DEBUG)
 # --- FIN HABILITAR LOGGING DEBUG ---
 
@@ -26,11 +25,15 @@ from typing import AsyncIterable
 
 from google.adk.events.event import Event
 from google.genai import types as generativelanguage_types
+# Necesitaremos Session si la pasamos directamente
+from google.adk.sessions.session import Session 
 
 from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.agents import LiveRequestQueue
-from google.adk.runners import Runner
+from google.adk.runners import Runner # Runner base
+# from google.adk.runners import InMemoryRunner # El ejemplo usa InMemoryRunner directamente
+
 from twilio.twiml.voice_response import VoiceResponse, Connect
 
 # Agente Jarvis (con herramientas)
@@ -43,9 +46,8 @@ except ImportError:
         root_agent = None
         logging.error("No se pudo importar root_agent. La funcionalidad de voz no funcionará.")
 
-# Configuración del logging principal de la aplicación
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__) # Tu logger de aplicación
+logger = logging.getLogger(__name__)
 
 if not os.getenv("K_SERVICE"):
     load_dotenv()
@@ -91,34 +93,49 @@ if root_agent:
             error_response.say("Error al procesar la llamada.", language="es-ES")
             return PlainTextResponse(str(error_response), status_code=500, media_type="application/xml")
 
-    async def start_agent_session(session_id: str):
-        logger.info(f"Iniciando y creando sesión ADK para CallSid: {session_id}")
-        try:
-            await session_service.create_session(
-                app_name=APP_NAME, user_id=session_id, session_id=session_id
-            )
-            logger.info(f"Sesión ADK creada explícitamente en InMemorySessionService para CallSid: {session_id}")
-        except Exception as e:
-            logger.error(f"Error al crear la sesión ADK para CallSid: {session_id}: {e}", exc_info=True)
-            raise 
-
-        runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
+    async def start_agent_session(session_id_str: str, is_audio: bool = True): # session_id_str es tu call_sid
+        logger.info(f"Iniciando y creando sesión ADK para CallSid: {session_id_str}, Audio: {is_audio}")
         
-        ########## RunConfig ACTUALIZADO ##########
-        run_config = RunConfig(
-            response_modalities=["AUDIO", "TEXT"],
-            input_audio_transcription=generativelanguage_types.AudioTranscriptionConfig(),
-            output_audio_transcription=generativelanguage_types.AudioTranscriptionConfig()
+        # El ejemplo usa InMemoryRunner directamente, lo que crea su propio session_service.
+        # Vamos a mantener tu runner con el session_service global por ahora,
+        # pero crearemos la sesión y la pasaremos.
+        
+        session_obj: Session = await session_service.create_session(
+            app_name=APP_NAME,
+            user_id=session_id_str, 
+            session_id=session_id_str # Usamos el mismo para session_id
         )
-        ########## FIN RunConfig ACTUALIZADO ##########
+        logger.info(f"Sesión ADK creada explícitamente para CallSid: {session_id_str}")
+
+        # Usamos el Runner base, ya que tienes session_service como una dependencia
+        runner = Runner(
+            app_name=APP_NAME,
+            agent=root_agent,
+            session_service=session_service # Usando tu session_service global
+        )
+        
+        ########## RunConfig SIMPLIFICADO AL ESTILO DEL EJEMPLO DEL ADK ##########
+        # El ejemplo pasa is_audio y determina una sola modalidad.
+        # Si siempre quieres AUDIO y TEXTO, puedes dejar ["AUDIO", "TEXT"].
+        # Si quieres seguir el patrón del ejemplo más de cerca:
+        # modality = "AUDIO" if is_audio else "TEXT"
+        # run_config = RunConfig(response_modalities=[modality])
+        
+        # Por ahora, mantendremos tu intención original de AUDIO y TEXTO, pero con la config simplificada:
+        run_config = RunConfig(
+            response_modalities=["AUDIO", "TEXT"]
+        )
+        logger.info(f"Usando RunConfig simplificado: {run_config}")
+        ########## FIN RunConfig SIMPLIFICADO ##########
         
         live_request_queue = LiveRequestQueue()
+        
         live_events_generator = runner.run_live(
-            user_id=session_id, session_id=session_id,
+            session=session_obj, # <--- Pasando el objeto Session directamente, como en el ejemplo
             live_request_queue=live_request_queue,
             run_config=run_config
         )
-        logger.info(f"Runner.run_live invocado para CallSid: {session_id} con RunConfig actualizado.")
+        logger.info(f"Runner.run_live invocado para CallSid: {session_id_str} pasando objeto Session.")
         return live_events_generator, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events: AsyncIterable[Event]):
@@ -128,6 +145,7 @@ if root_agent:
                 if websocket.client_state == WebSocketState.DISCONNECTED:
                     logger.warning(f"WebSocket desconectado (Gemini->Twilio) para CallSid: {call_sid}. Terminando.")
                     break
+                # (El resto de la lógica de process_gemini_responses permanece igual)
                 if not hasattr(event, 'type'):
                     logger.warning(f"Evento ADK sin 'type' para CallSid: {call_sid}. Evento: {event}")
                     continue
@@ -154,12 +172,12 @@ if root_agent:
                 elif event.type == generativelanguage_types.LiveEventType.ERROR:
                     logger.error(f"Error en evento ADK para CallSid: {call_sid}: {getattr(event, 'error', 'Error desconocido')}")
                     break
-        except websockets.exceptions.ConnectionClosed as e: # Captura específica para el cierre desde el ADK
+        except websockets.exceptions.ConnectionClosedError as e:
             logger.warning(f"Conexión WebSocket con ADK cerrada para CallSid: {call_sid}. Código: {e.code}, Razón: {e.reason}", exc_info=True)
         except asyncio.CancelledError:
             logger.info(f"`process_gemini_responses` cancelado para CallSid: {call_sid}")
         except ValueError as e: 
-            if "Session not found" in str(e):
+            if "Session not found" in str(e): # Esto no debería ocurrir si pasamos el objeto Session
                 logger.error(f"Error de sesión en ADK (process_gemini_responses) para CallSid {call_sid}: {e}", exc_info=True)
             else:
                 logger.error(f"ValueError en `process_gemini_responses` para CallSid: {call_sid}: {e}", exc_info=True)
@@ -180,6 +198,7 @@ if root_agent:
                 message_json = json.loads(message_str)
                 event_type = message_json.get("event")
 
+                # (El resto de la lógica de process_twilio_audio permanece igual)
                 if event_type == "start":
                     stream_sid = message_json.get("start", {}).get("streamSid")
                     if stream_sid: active_streams_sids[call_sid] = stream_sid
@@ -213,10 +232,9 @@ if root_agent:
                             logger.warning(f"Error al llamar a live_request_queue.close() para CallSid {call_sid}: {e}")
                         queue_open_for_sending = False 
                     break
-                elif event_type == "mark": # Añadido manejo de mark para completitud
+                elif event_type == "mark":
                     mark_name = message_json.get('mark', {}).get('name')
                     logger.info(f"Evento 'mark' de Twilio para CallSid: {call_sid}. Nombre: {mark_name}")
-
         except WebSocketDisconnect as e:
             logger.info(f"WS desconectado (Twilio->App) por Twilio para CallSid: {call_sid}. Code: {e.code}")
         except websockets.exceptions.ConnectionClosed as e:
@@ -244,10 +262,11 @@ if root_agent:
         live_request_queue: LiveRequestQueue = None
         queue_open_for_sending_ws_level = True
         try:
-            live_events_generator, live_request_queue = await start_agent_session(call_sid)
+            # El segundo argumento de start_agent_session es is_audio, por defecto True
+            live_events_generator, live_request_queue = await start_agent_session(call_sid) 
             
             initial_greeting_text = "Hola, soy Jarvis, tu asistente de inteligencia artificial. ¿En qué puedo ayudarte hoy?"
-            logger.info(f"Enviando saludo inicial '{initial_greeting_text}' a Gemini para CallSid: {call_sid}") # Log reinsertado
+            logger.info(f"Enviando saludo inicial '{initial_greeting_text}' a Gemini para CallSid: {call_sid}")
             initial_content = generativelanguage_types.Content(parts=[generativelanguage_types.Part(text=initial_greeting_text)])
             try:
                 live_request_queue.send_content(content=initial_content)
@@ -266,7 +285,7 @@ if root_agent:
             await asyncio.gather(*done, *pending, return_exceptions=True)
             logger.info(f"Tareas principales para CallSid: {call_sid} finalizadas o canceladas.")
         except ValueError as e: 
-            if "Session not found" in str(e) or "Error al crear la sesión ADK" in str(e):
+            if "Session not found" in str(e) or "Error al crear la sesión ADK" in str(e): # Este último es de nuestra propia lógica de creación
                 logger.error(f"Fallo crítico al iniciar la sesión ADK para CallSid {call_sid}: {e}", exc_info=True)
             else:
                 logger.error(f"ValueError en `websocket_audio_endpoint` para CallSid: {call_sid}: {e}", exc_info=True)
@@ -287,7 +306,7 @@ if root_agent:
             logger.info(f"Finalizado `websocket_audio_endpoint` para CallSid: {call_sid}")
 
 @app.get("/", response_class=PlainTextResponse)
-async def read_root(): return "Servidor del agente de voz Gemini-Twilio (Debug Logging ADK) activo."
+async def read_root(): return "Servidor del agente de voz Gemini-Twilio (RunConfig Simplificado) activo."
 
 @app.get("/_ah/health", response_class=PlainTextResponse)
 async def health_check(): return "OK"
