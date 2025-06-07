@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN FINAL Y CORRECTA: Corrige el ValidationError y el RuntimeWarning.
+# VERSIÓN FINAL: Corrige el error "Invalid Argument" simplificando el RunConfig.
 
 import os
 import json
@@ -15,14 +15,13 @@ from fastapi.websockets import WebSocketState
 from dotenv import load_dotenv
 
 # ================================================
-# --- SDK de Google, ADK y Librerías de Audio ---
+# --- SDK de Google, ADK y Librerías ---
 # ================================================
 from google.genai import types as generativelanguage_types
 from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.agents import LiveRequestQueue
 from google.adk.runners import Runner
-from pydub import AudioSegment
 
 # Twilio
 from twilio.twiml.voice_response import VoiceResponse, Start
@@ -82,24 +81,21 @@ if root_agent:
             logger.error(f"Error en /voice: {e}", exc_info=True)
             return PlainTextResponse("<Response><Say>Error al procesar la llamada.</Say></Response>", status_code=500, media_type="application/xml")
 
-    # --- CORRECCIÓN DE RUNTIMEWARNING: La función debe ser async ---
     async def start_agent_session(session_id: str):
         logger.info(f"Iniciando sesión ADK para: {session_id}")
-        
-        # --- CORRECCIÓN DE RUNTIMEWARNING: Se añade 'await' ---
         session = await session_service.create_session(
             app_name=APP_NAME, user_id=session_id, session_id=session_id
         )
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
-        # Se crea un `SpeechConfig` para solicitar a Gemini que genere audio.
+        # --- CONFIGURACIÓN FINAL Y CORRECTA PARA LA API DE GEMINI LIVE ---
+        # Creamos un SpeechConfig que especifica directamente el formato de audio de salida.
+        # Esto es para un caso de uso de telefonía y es lógicamente coherente,
+        # lo que evita el error "Invalid Argument" del backend de Google.
         speech_config = generativelanguage_types.SpeechConfig(
-            voice_config=generativelanguage_types.VoiceConfig(
-                prebuilt_voice_config=generativelanguage_types.PrebuiltVoiceConfig(voice_name="Puck")
-            )
+            audio_encoding="MULAW"
         )
         
-        # --- CORRECCIÓN DE VALIDATIONERROR: Se crea un objeto vacío ---
         run_config = RunConfig(
             response_modalities=["AUDIO", "TEXT"],
             speech_config=speech_config,
@@ -108,7 +104,7 @@ if root_agent:
         
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados con la configuración correcta.")
+        logger.info("Sesión ADK y runner iniciados con configuración de telefonía directa.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
@@ -116,11 +112,8 @@ if root_agent:
             async for event in live_events:
                 if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
                     if event.output_data and event.output_data.audio_data:
-                        gemini_audio_chunk = event.output_data.audio_data.data
-                        audio_segment = AudioSegment(data=gemini_audio_chunk, sample_width=2, frame_rate=24000, channels=1)
-                        buffer = io.BytesIO()
-                        audio_segment.export(buffer, format="mulaw", frame_rate=8000)
-                        twilio_audio_chunk = buffer.getvalue()
+                        # No se necesita transcodificación. El audio ya viene en MULAW.
+                        twilio_audio_chunk = event.output_data.audio_data.data
                         payload = base64.b64encode(twilio_audio_chunk).decode("utf-8")
                         stream_sid = active_streams_sids.get(call_sid)
                         if stream_sid:
@@ -129,7 +122,11 @@ if root_agent:
                     logger.info(f"Sesión ADK finalizada para {call_sid}.")
                     break
         except Exception as e:
-            logger.error(f"Error en process_gemini_responses: {e}", exc_info=True)
+            # El ConnectionClosedError es esperado si la llamada cuelga. Lo registramos como INFO.
+            if isinstance(e, websockets.exceptions.ConnectionClosedError):
+                logger.info(f"Conexión con el backend de Gemini cerrada para {call_sid}: {e}")
+            else:
+                logger.error(f"Error en process_gemini_responses: {e}", exc_info=True)
 
     async def process_twilio_audio(websocket: WebSocket, call_sid: str, live_request_queue: LiveRequestQueue):
         try:
@@ -156,9 +153,7 @@ if root_agent:
         await websocket.accept()
         logger.info(f"🔗 WebSocket aceptado para {call_sid}")
         try:
-            # --- CORRECCIÓN DE RUNTIMEWARNING: Se añade 'await' a la llamada ---
             live_events, live_request_queue = await start_agent_session(call_sid)
-            
             twilio_task = asyncio.create_task(process_twilio_audio(websocket, call_sid, live_request_queue))
             gemini_task = asyncio.create_task(process_gemini_responses(websocket, call_sid, live_events))
             await asyncio.gather(twilio_task, gemini_task)
