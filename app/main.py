@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN FINAL: Usa el modelo y la configuración recomendados por la documentación del ADK.
+# VERSIÓN FINAL: Usa el modelo de audio nativo y el RunConfig más simple.
 
 import os
 import json
@@ -79,16 +79,16 @@ if root_agent:
         )
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
-        # --- CONFIGURACIÓN FINAL: LA MÁS SIMPLE POSIBLE, COMO EN LA DOCU DEL ADK ---
-        # Confiamos en que el ADK, al ver el modelo 'gemini-2.0-flash-exp',
-        # configurará el streaming de audio internamente.
+        # --- LA CONFIGURACIÓN MÁS SIMPLE PARA EL MODELO NATIVO ---
+        # No le damos ninguna configuración de audio. Confiamos en que el modelo y el ADK
+        # se entiendan entre sí. Esta fue la combinación que NO dio errores de conexión.
         run_config = RunConfig(
             response_modalities=["AUDIO", "TEXT"]
         )
         
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados con configuración mínima recomendada.")
+        logger.info("Sesión ADK y runner iniciados con configuración mínima para modelo nativo.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
@@ -96,7 +96,6 @@ if root_agent:
             async for event in live_events:
                 if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
                     if event.output_data and event.output_data.audio_data:
-                        # El modelo debe devolver audio MULAW o algo compatible
                         twilio_audio_chunk = event.output_data.audio_data.data
                         payload = base64.b64encode(twilio_audio_chunk).decode("utf-8")
                         stream_sid = active_streams_sids.get(call_sid)
@@ -119,8 +118,6 @@ if root_agent:
                     active_streams_sids[call_sid] = message_json.get("start", {}).get("streamSid")
                 elif event_type == "media":
                     if live_request_queue:
-                        # Enviamos el audio MULAW de Twilio directamente.
-                        # El ADK y el modelo 'exp' deberían poder manejarlo.
                         blob_data = generativelanguage_types.Blob(data=base64.b64decode(message_json["media"]["payload"]), mime_type="audio/x-mulaw")
                         live_request_queue.send_realtime(blob_data)
                 elif event_type == "stop":
