@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN FINAL: Corregido con el nuevo SDK `google-genai` y la configuración correcta para Twilio.
+# VERSIÓN FINAL Y CORRECTA: Basada en la definición de RunConfig del ADK.
 
 import os
 import json
@@ -16,22 +16,17 @@ from dotenv import load_dotenv
 # ================================================
 # --- SDK de Google y Dependencias del Agente ---
 # ================================================
-# ¡CORRECCIÓN GRACIAS A TU HALLAZGO!
-# Se usa el nuevo SDK. El paquete pip es 'google-genai'.
 from google.genai import types as generativelanguage_types
 
-from google.cloud import secretmanager
 from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.agents import LiveRequestQueue
 from google.adk.runners import Runner
 
-# Dependencias de Google Calendar
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request as GoogleAuthRequest
-import googleapiclient.discovery
+# Twilio
+from twilio.twiml.voice_response import VoiceResponse, Start
 
-# Agente Jarvis
+# Agente Jarvis (Ajusta la ruta si es necesario)
 try:
     from app.jarvis.agent import root_agent
 except ImportError:
@@ -41,26 +36,20 @@ except ImportError:
         root_agent = None
         logging.error("No se pudo importar root_agent. La funcionalidad de voz no funcionará.")
 
-# Twilio
-from twilio.twiml.voice_response import VoiceResponse, Start
-
 # ================================================
 # 0. Configuración de Logging y Entorno
 # ================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Cargar variables de entorno desde .env si no estamos en un servicio de Google Cloud
 if not os.getenv("K_SERVICE"):
     load_dotenv()
 
 APP_NAME = "Twilio Voice Agent Gemini"
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL")
 
-# La API Key de Gemini se debe configurar como una variable de entorno llamada GOOGLE_API_KEY.
-# El SDK la detectará automáticamente. No es necesario `genai.configure()`.
 if not os.getenv("GOOGLE_API_KEY"):
-    logger.warning("La variable de entorno GOOGLE_API_KEY no está configurada.")
+    logger.warning("ADVERTENCIA: La variable de entorno GOOGLE_API_KEY no está configurada.")
 
 session_service = InMemorySessionService()
 app = FastAPI(title=APP_NAME, version="0.1.0")
@@ -80,10 +69,8 @@ if root_agent:
             logger.info(f"📞 Llamada entrante de Twilio - SID: {call_sid}")
             response = VoiceResponse()
             if not SERVER_BASE_URL:
-                 logger.error("SERVER_BASE_URL no está configurada.")
                  response.say("Error de configuración del servidor.", language="es-ES")
                  return PlainTextResponse(str(response), media_type="application/xml")
-
             websocket_url = f"wss://{SERVER_BASE_URL.replace('https://', '')}/stream/{call_sid}"
             start = Start()
             start.stream(url=websocket_url)
@@ -98,26 +85,27 @@ if root_agent:
         logger.info(f"Iniciando sesión ADK para: {session_id}")
         session = session_service.create_session(app_name=APP_NAME, user_id=session_id, session_id=session_id)
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
+
+        # --- CONFIGURACIÓN FINAL Y CORRECTA BASADA EN EL CÓDIGO FUENTE DE RunConfig ---
+        # 1. Se crea un `SpeechConfig` para definir el formato del audio de SALIDA (la voz de Gemini).
+        #    Es crucial especificar `audio_encoding` y `sample_rate_hertz` para que sea compatible con Twilio.
+        speech_config = generativelanguage_types.SpeechConfig(
+            audio_encoding="MULAW",
+            sample_rate_hertz=8000
+        )
         
-        # --- CONFIGURACIÓN CORRECTA PARA TWILIO USANDO EL NUEVO SDK ---
-        # Usamos `input_audio_config` y `output_audio_config` para el caso de telefonía.
-        # Los objetos de configuración se construyen desde `generativelanguage_types`,
-        # que ahora es un alias para `google.genai.types`.
+        # 2. Se construye el `RunConfig` usando los campos que realmente existen:
+        #    - `speech_config`: Para la salida de audio.
+        #    - `input_audio_transcription`: Para habilitar la ENTRADA de audio.
         run_config = RunConfig(
             response_modalities=["AUDIO", "TEXT"],
-            input_audio_config=generativelanguage_types.AudioConfig(
-                audio_encoding="MULAW",
-                sample_rate_hertz=8000
-            ),
-            output_audio_config=generativelanguage_types.AudioConfig(
-                audio_encoding="MULAW",
-                sample_rate_hertz=8000
-            )
+            speech_config=speech_config,
+            input_audio_transcription=generativelanguage_types.AudioTranscriptionConfig(enable=True)
         )
         
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados con configuración para streaming personalizado.")
+        logger.info("Sesión ADK y runner iniciados con la configuración correcta de SpeechConfig y AudioTranscriptionConfig.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
@@ -125,8 +113,7 @@ if root_agent:
             async for event in live_events:
                 if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
                     if event.output_data and event.output_data.audio_data:
-                        audio_chunk = event.output_data.audio_data.data
-                        payload = base64.b64encode(audio_chunk).decode("utf-8")
+                        payload = base64.b64encode(event.output_data.audio_data.data).decode("utf-8")
                         stream_sid = active_streams_sids.get(call_sid)
                         if stream_sid:
                             await websocket.send_json({"event": "media", "streamSid": stream_sid, "media": {"payload": payload}})
@@ -142,19 +129,14 @@ if root_agent:
                 message_json = await websocket.receive_json()
                 event_type = message_json.get("event")
                 if event_type == "start":
-                    stream_sid = message_json.get("start", {}).get("streamSid")
-                    active_streams_sids[call_sid] = stream_sid
+                    active_streams_sids[call_sid] = message_json.get("start", {}).get("streamSid")
                 elif event_type == "media":
-                    payload = message_json["media"]["payload"]
-                    audio_data_raw = base64.b64decode(payload)
                     if live_request_queue:
-                        # Se usa Blob desde `google.genai.types`
-                        blob_data = generativelanguage_types.Blob(data=audio_data_raw, mime_type="audio/x-mulaw")
+                        blob_data = generativelanguage_types.Blob(data=base64.b64decode(message_json["media"]["payload"]), mime_type="audio/x-mulaw")
                         live_request_queue.send_realtime(blob_data)
                 elif event_type == "stop":
                     logger.info(f"Stream de Twilio detenido para {call_sid}.")
-                    if live_request_queue:
-                        live_request_queue.close()
+                    if live_request_queue: live_request_queue.close()
                     break
         except WebSocketDisconnect:
             logger.info(f"WS desconectado por Twilio para {call_sid}.")
@@ -174,10 +156,8 @@ if root_agent:
             logger.error(f"Error en websocket_audio_endpoint: {e}", exc_info=True)
         finally:
             logger.info(f"🧹 Limpiando recursos para {call_sid}")
-            if call_sid in active_streams_sids:
-                del active_streams_sids[call_sid]
-            if websocket.client_state != WebSocketState.DISCONNECTED:
-                await websocket.close(code=1000)
+            if call_sid in active_streams_sids: del active_streams_sids[call_sid]
+            if websocket.client_state != WebSocketState.DISCONNECTED: await websocket.close(code=1000)
 
 @app.get("/", response_class=PlainTextResponse)
 async def read_root(): return "Servidor del agente de voz activo."
