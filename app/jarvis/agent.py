@@ -10,7 +10,7 @@ from .tools import (
 )
 root_agent = Agent(
     # Este es el modelo que el ADK recomienda para este caso de uso
-    model="gemini-2.5-flash-preview-native-audio-dialog", 
+    model="gemini-2.0-flash-live-001", 
     name="jarvis",
     description="Agent to help with scheduling and calendar operations.",
     instruction=f"""
