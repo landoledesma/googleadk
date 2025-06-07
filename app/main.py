@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN FINAL: Usa el verbo <Connect> de Twilio, que es la solución correcta.
+# VERSIÓN FINAL: Corrige el error de sintaxis en la creación del mensaje inicial.
 
 import os
 import json
@@ -18,9 +18,7 @@ from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.agents import LiveRequestQueue
 from google.adk.runners import Runner
-
-# --- CAMBIO CLAVE: Importamos Connect ---
-from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
+from twilio.twiml.voice_response import VoiceResponse, Connect
 
 # Agente Jarvis (con herramientas)
 try:
@@ -51,44 +49,27 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 active_streams_sids = {}
 
 if root_agent:
-    # ===================================================================
-    # --- ESTA ES LA ÚNICA FUNCIÓN QUE CAMBIA ---
-    # ===================================================================
     @app.post("/voice", response_class=PlainTextResponse)
     async def voice_webhook(request: Request):
         try:
             form = await request.form()
             call_sid = form.get("CallSid")
             logger.info(f"📞 Llamada entrante de Twilio - SID: {call_sid}")
-            
             response = VoiceResponse()
-            
             if not SERVER_BASE_URL:
                  response.say("Error de configuración del servidor.", language="es-ES")
                  return PlainTextResponse(str(response), media_type="application/xml")
-
             websocket_url = f"wss://{SERVER_BASE_URL.replace('https://', '')}/stream/{call_sid}"
             logger.info(f"Instruyendo a Twilio que se conecte a: {websocket_url}")
-
-            # Usamos el verbo <Connect> que es más robusto para iniciar un stream.
             connect = Connect()
             connect.stream(url=websocket_url)
             response.append(connect)
-            
-            # Añadimos una pausa. Esto mantiene la llamada activa mientras se establece la conexión WebSocket.
-            # Si la conexión se establece, la pausa se interrumpe. Si no, la llamada colgará después de 30s.
-            # Esto evita que la llamada se cuelgue inmediatamente.
             response.pause(length=30)
-            
             logger.info(f"Respondiendo a Twilio con TwiML: {str(response)}")
             return PlainTextResponse(str(response), media_type="application/xml")
-            
         except Exception as e:
             logger.error(f"Error en /voice: {e}", exc_info=True)
             return PlainTextResponse("<Response><Say>Error al procesar la llamada.</Say></Response>", status_code=500, media_type="application/xml")
-    # ===================================================================
-    # --- EL RESTO DEL CÓDIGO SE MANTIENE EXACTAMENTE IGUAL ---
-    # ===================================================================
 
     async def start_agent_session(session_id: str):
         logger.info(f"Iniciando sesión ADK para: {session_id}")
@@ -149,10 +130,13 @@ if root_agent:
         logger.info(f"🔗 WebSocket aceptado para {call_sid}")
         try:
             live_events, live_request_queue = await start_agent_session(call_sid)
-            # Enviar saludo inicial al agente
+            
+            # --- CORRECCIÓN DE SINTAXIS ---
+            logger.info("Enviando saludo inicial al agente para romper el silencio...")
             initial_content = generativelanguage_types.Content(
                 role="user",
-                parts=[generativelanguage_types.Part.from_text("Saluda al usuario y preséntate como Jarvis.")]
+                # Se usa Part(text=...) en lugar del método de clase incorrecto
+                parts=[generativelanguage_types.Part(text="Saluda al usuario y preséntate como Jarvis.")]
             )
             live_request_queue.send_content(content=initial_content)
             
