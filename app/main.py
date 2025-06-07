@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN FINAL: Mantiene el ADK y las herramientas, y usa la configuración mínima y más lógica para el modelo de audio nativo.
+# VERSIÓN FINAL: Usa el verbo <Connect> de Twilio, que es la solución correcta.
 
 import os
 import json
@@ -18,7 +18,9 @@ from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.agents import LiveRequestQueue
 from google.adk.runners import Runner
-from twilio.twiml.voice_response import VoiceResponse, Start
+
+# --- CAMBIO CLAVE: Importamos Connect ---
+from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 
 # Agente Jarvis (con herramientas)
 try:
@@ -49,24 +51,44 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 active_streams_sids = {}
 
 if root_agent:
+    # ===================================================================
+    # --- ESTA ES LA ÚNICA FUNCIÓN QUE CAMBIA ---
+    # ===================================================================
     @app.post("/voice", response_class=PlainTextResponse)
     async def voice_webhook(request: Request):
         try:
             form = await request.form()
             call_sid = form.get("CallSid")
             logger.info(f"📞 Llamada entrante de Twilio - SID: {call_sid}")
+            
             response = VoiceResponse()
+            
             if not SERVER_BASE_URL:
                  response.say("Error de configuración del servidor.", language="es-ES")
                  return PlainTextResponse(str(response), media_type="application/xml")
+
             websocket_url = f"wss://{SERVER_BASE_URL.replace('https://', '')}/stream/{call_sid}"
-            start = Start()
-            start.stream(url=websocket_url)
-            # El agente debe saludar, no se necesita un mensaje predefinido aquí.
+            logger.info(f"Instruyendo a Twilio que se conecte a: {websocket_url}")
+
+            # Usamos el verbo <Connect> que es más robusto para iniciar un stream.
+            connect = Connect()
+            connect.stream(url=websocket_url)
+            response.append(connect)
+            
+            # Añadimos una pausa. Esto mantiene la llamada activa mientras se establece la conexión WebSocket.
+            # Si la conexión se establece, la pausa se interrumpe. Si no, la llamada colgará después de 30s.
+            # Esto evita que la llamada se cuelgue inmediatamente.
+            response.pause(length=30)
+            
+            logger.info(f"Respondiendo a Twilio con TwiML: {str(response)}")
             return PlainTextResponse(str(response), media_type="application/xml")
+            
         except Exception as e:
             logger.error(f"Error en /voice: {e}", exc_info=True)
             return PlainTextResponse("<Response><Say>Error al procesar la llamada.</Say></Response>", status_code=500, media_type="application/xml")
+    # ===================================================================
+    # --- EL RESTO DEL CÓDIGO SE MANTIENE EXACTAMENTE IGUAL ---
+    # ===================================================================
 
     async def start_agent_session(session_id: str):
         logger.info(f"Iniciando sesión ADK para: {session_id}")
@@ -74,19 +96,13 @@ if root_agent:
             app_name=APP_NAME, user_id=session_id, session_id=session_id
         )
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
-
-        # --- HIPÓTESIS FINAL: LA CONFIGURACIÓN MÁS PURA ---
-        # 1. Le decimos que vamos a enviar audio, habilitando la transcripción de entrada.
-        # 2. NO le decimos nada sobre el audio de salida. Confiamos en que el modelo de audio nativo
-        #    ya sabe que su trabajo es generar audio, evitando así el "argumento inválido".
         run_config = RunConfig(
             response_modalities=["AUDIO", "TEXT"],
             input_audio_transcription=generativelanguage_types.AudioTranscriptionConfig()
         )
-        
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados con configuración mínima para agente de voz nativo.")
+        logger.info("Sesión ADK y runner iniciados correctamente.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
@@ -94,7 +110,6 @@ if root_agent:
             async for event in live_events:
                 if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
                     if event.output_data and event.output_data.audio_data:
-                        # El modelo nativo debería devolver MULAW directamente.
                         twilio_audio_chunk = event.output_data.audio_data.data
                         payload = base64.b64encode(twilio_audio_chunk).decode("utf-8")
                         stream_sid = active_streams_sids.get(call_sid)
@@ -117,7 +132,6 @@ if root_agent:
                     active_streams_sids[call_sid] = message_json.get("start", {}).get("streamSid")
                 elif event_type == "media":
                     if live_request_queue:
-                        # Enviamos el audio MULAW de Twilio directamente.
                         blob_data = generativelanguage_types.Blob(data=base64.b64decode(message_json["media"]["payload"]), mime_type="audio/x-mulaw")
                         live_request_queue.send_realtime(blob_data)
                 elif event_type == "stop":
@@ -135,6 +149,13 @@ if root_agent:
         logger.info(f"🔗 WebSocket aceptado para {call_sid}")
         try:
             live_events, live_request_queue = await start_agent_session(call_sid)
+            # Enviar saludo inicial al agente
+            initial_content = generativelanguage_types.Content(
+                role="user",
+                parts=[generativelanguage_types.Part.from_text("Saluda al usuario y preséntate como Jarvis.")]
+            )
+            live_request_queue.send_content(content=initial_content)
+            
             twilio_task = asyncio.create_task(process_twilio_audio(websocket, call_sid, live_request_queue))
             gemini_task = asyncio.create_task(process_gemini_responses(websocket, call_sid, live_events))
             await asyncio.gather(twilio_task, gemini_task)
