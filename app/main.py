@@ -1,11 +1,13 @@
 # main.py
-# VERSIÓN FINAL: Corrige el error de sintaxis en la creación del mensaje inicial.
+# VERSIÓN FINAL: Corrige el `RunConfig` final y un `NameError`.
 
 import os
 import json
 import base64
 import asyncio
 import logging
+import io
+import websockets # <-- CORRECCIÓN: Se importa el módulo para manejar excepciones
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
@@ -15,6 +17,8 @@ from dotenv import load_dotenv
 
 from google.genai import types as generativelanguage_types
 from google.adk.agents.run_config import RunConfig
+# --- CORRECCIÓN: Importamos la enumeración de Modalidad ---
+from google.adk.models.generated import Modality
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.agents import LiveRequestQueue
 from google.adk.runners import Runner
@@ -77,10 +81,16 @@ if root_agent:
             app_name=APP_NAME, user_id=session_id, session_id=session_id
         )
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
+
+        # --- CONFIGURACIÓN FINAL: LA MÁS SIMPLE Y LÓGICA ---
+        # 1. Usamos la enumeración `Modality` para evitar las advertencias de Pydantic.
+        # 2. Habilitamos `input_audio_transcription` para decirle al ADK que escuche.
+        # 3. NO especificamos `speech_config` para no entrar en conflicto con el modelo de audio nativo.
         run_config = RunConfig(
-            response_modalities=["AUDIO", "TEXT"],
+            response_modalities=[Modality.AUDIO, Modality.TEXT],
             input_audio_transcription=generativelanguage_types.AudioTranscriptionConfig()
         )
+        
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
         logger.info("Sesión ADK y runner iniciados correctamente.")
@@ -99,6 +109,7 @@ if root_agent:
                 elif event.type == generativelanguage_types.LiveEventType.SESSION_ENDED:
                     logger.info(f"Sesión ADK finalizada para {call_sid}.")
                     break
+        # --- CORRECCIÓN: Se usa `websockets` (importado) para capturar la excepción ---
         except websockets.exceptions.ConnectionClosedError as e:
             logger.info(f"Conexión con el backend de Gemini cerrada (normal al colgar): {e}")
         except Exception as e:
@@ -130,12 +141,8 @@ if root_agent:
         logger.info(f"🔗 WebSocket aceptado para {call_sid}")
         try:
             live_events, live_request_queue = await start_agent_session(call_sid)
-            
-            # --- CORRECCIÓN DE SINTAXIS ---
-            logger.info("Enviando saludo inicial al agente para romper el silencio...")
             initial_content = generativelanguage_types.Content(
                 role="user",
-                # Se usa Part(text=...) en lugar del método de clase incorrecto
                 parts=[generativelanguage_types.Part(text="Saluda al usuario y preséntate como Jarvis.")]
             )
             live_request_queue.send_content(content=initial_content)
