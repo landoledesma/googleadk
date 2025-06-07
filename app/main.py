@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN CON RunConfig SIMPLIFICADO Y PASO DE SESIÓN AL ESTILO EJEMPLO ADK
+# VERSIÓN CON RESPONSE_MODALITIES COMO ENUM Y SPEECH_CONFIG BÁSICO
 
 import os
 import json
@@ -21,18 +21,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.websockets import WebSocketState
 from dotenv import load_dotenv
 
-from typing import AsyncIterable
+from typing import AsyncIterable, List # Añadir List para la pista de tipo de modalities
 
 from google.adk.events.event import Event
 from google.genai import types as generativelanguage_types
-# Necesitaremos Session si la pasamos directamente
 from google.adk.sessions.session import Session 
 
 from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.agents import LiveRequestQueue
-from google.adk.runners import Runner # Runner base
-# from google.adk.runners import InMemoryRunner # El ejemplo usa InMemoryRunner directamente
+from google.adk.runners import Runner
 
 from twilio.twiml.voice_response import VoiceResponse, Connect
 
@@ -69,6 +67,7 @@ active_streams_sids = {}
 if root_agent:
     @app.post("/voice", response_class=PlainTextResponse)
     async def voice_webhook(request: Request):
+        # ... (código sin cambios) ...
         try:
             form = await request.form()
             call_sid = form.get("CallSid")
@@ -93,45 +92,49 @@ if root_agent:
             error_response.say("Error al procesar la llamada.", language="es-ES")
             return PlainTextResponse(str(error_response), status_code=500, media_type="application/xml")
 
-    async def start_agent_session(session_id_str: str, is_audio: bool = True): # session_id_str es tu call_sid
-        logger.info(f"Iniciando y creando sesión ADK para CallSid: {session_id_str}, Audio: {is_audio}")
-        
-        # El ejemplo usa InMemoryRunner directamente, lo que crea su propio session_service.
-        # Vamos a mantener tu runner con el session_service global por ahora,
-        # pero crearemos la sesión y la pasaremos.
+
+    async def start_agent_session(session_id_str: str, is_audio_mode: bool = True):
+        logger.info(f"Iniciando y creando sesión ADK para CallSid: {session_id_str}, Audio Mode: {is_audio_mode}")
         
         session_obj: Session = await session_service.create_session(
-            app_name=APP_NAME,
-            user_id=session_id_str, 
-            session_id=session_id_str # Usamos el mismo para session_id
+            app_name=APP_NAME, user_id=session_id_str, session_id=session_id_str
         )
         logger.info(f"Sesión ADK creada explícitamente para CallSid: {session_id_str}")
 
-        # Usamos el Runner base, ya que tienes session_service como una dependencia
         runner = Runner(
-            app_name=APP_NAME,
-            agent=root_agent,
-            session_service=session_service # Usando tu session_service global
+            app_name=APP_NAME, agent=root_agent, session_service=session_service
         )
         
-        ########## RunConfig SIMPLIFICADO AL ESTILO DEL EJEMPLO DEL ADK ##########
-        # El ejemplo pasa is_audio y determina una sola modalidad.
-        # Si siempre quieres AUDIO y TEXTO, puedes dejar ["AUDIO", "TEXT"].
-        # Si quieres seguir el patrón del ejemplo más de cerca:
-        # modality = "AUDIO" if is_audio else "TEXT"
-        # run_config = RunConfig(response_modalities=[modality])
+        ########## RunConfig con Enums y SpeechConfig Básico ##########
+        active_modalities: List[generativelanguage_types.Modality] = []
+        speech_synthesis_config: Optional[generativelanguage_types.SpeechConfig] = None
+
+        if is_audio_mode: # Asumimos que si is_audio_mode es true, queremos respuesta de audio
+            active_modalities.append(generativelanguage_types.Modality.AUDIO)
+            speech_synthesis_config = generativelanguage_types.SpeechConfig(
+                language_code="es-ES"  # O el idioma que necesites para la salida de voz
+            )
+            logger.info(f"Modo audio activado. SpeechConfig: {speech_synthesis_config}")
         
-        # Por ahora, mantendremos tu intención original de AUDIO y TEXTO, pero con la config simplificada:
+        # Siempre incluimos TEXTO para el saludo inicial y posibles mensajes de error del agente.
+        # Si la Prueba A (solo AUDIO) funciona y luego quieres reintroducir TEXTO para respuestas mixtas:
+        # active_modalities.append(generativelanguage_types.Modality.TEXT)
+
+        # Para la PRUEBA A (enfocada en arreglar el audio):
+        if not active_modalities: # Si por alguna razón is_audio_mode fuera False y no añadiéramos TEXTO
+             active_modalities.append(generativelanguage_types.Modality.TEXT) # Default a texto para que no esté vacío
+
         run_config = RunConfig(
-            response_modalities=["AUDIO", "TEXT"]
+            response_modalities=active_modalities,
+            speech_config=speech_synthesis_config
         )
-        logger.info(f"Usando RunConfig simplificado: {run_config}")
-        ########## FIN RunConfig SIMPLIFICADO ##########
+        logger.info(f"Usando RunConfig: {run_config}")
+        ########## FIN RunConfig ##########
         
         live_request_queue = LiveRequestQueue()
         
         live_events_generator = runner.run_live(
-            session=session_obj, # <--- Pasando el objeto Session directamente, como en el ejemplo
+            session=session_obj,
             live_request_queue=live_request_queue,
             run_config=run_config
         )
@@ -139,13 +142,13 @@ if root_agent:
         return live_events_generator, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events: AsyncIterable[Event]):
+        # ... (código sin cambios) ...
         logger.info(f"Iniciando `process_gemini_responses` para CallSid: {call_sid}")
         try:
             async for event in live_events:
                 if websocket.client_state == WebSocketState.DISCONNECTED:
                     logger.warning(f"WebSocket desconectado (Gemini->Twilio) para CallSid: {call_sid}. Terminando.")
                     break
-                # (El resto de la lógica de process_gemini_responses permanece igual)
                 if not hasattr(event, 'type'):
                     logger.warning(f"Evento ADK sin 'type' para CallSid: {call_sid}. Evento: {event}")
                     continue
@@ -177,7 +180,7 @@ if root_agent:
         except asyncio.CancelledError:
             logger.info(f"`process_gemini_responses` cancelado para CallSid: {call_sid}")
         except ValueError as e: 
-            if "Session not found" in str(e): # Esto no debería ocurrir si pasamos el objeto Session
+            if "Session not found" in str(e):
                 logger.error(f"Error de sesión en ADK (process_gemini_responses) para CallSid {call_sid}: {e}", exc_info=True)
             else:
                 logger.error(f"ValueError en `process_gemini_responses` para CallSid: {call_sid}: {e}", exc_info=True)
@@ -186,7 +189,9 @@ if root_agent:
         finally:
             logger.info(f"Finalizando `process_gemini_responses` para CallSid: {call_sid}")
 
+
     async def process_twilio_audio(websocket: WebSocket, call_sid: str, live_request_queue: LiveRequestQueue):
+        # ... (código sin cambios) ...
         logger.info(f"Iniciando `process_twilio_audio` para CallSid: {call_sid}")
         queue_open_for_sending = True
         try:
@@ -198,7 +203,6 @@ if root_agent:
                 message_json = json.loads(message_str)
                 event_type = message_json.get("event")
 
-                # (El resto de la lógica de process_twilio_audio permanece igual)
                 if event_type == "start":
                     stream_sid = message_json.get("start", {}).get("streamSid")
                     if stream_sid: active_streams_sids[call_sid] = stream_sid
@@ -254,6 +258,7 @@ if root_agent:
                 except Exception as e:
                     logger.warning(f"Error al asegurar cierre de live_request_queue para CallSid {call_sid}: {e}")
 
+
     @app.websocket("/stream/{call_sid}")
     async def websocket_audio_endpoint(websocket: WebSocket, call_sid: str):
         await websocket.accept()
@@ -262,7 +267,7 @@ if root_agent:
         live_request_queue: LiveRequestQueue = None
         queue_open_for_sending_ws_level = True
         try:
-            # El segundo argumento de start_agent_session es is_audio, por defecto True
+            # Por defecto, is_audio_mode es True en start_agent_session
             live_events_generator, live_request_queue = await start_agent_session(call_sid) 
             
             initial_greeting_text = "Hola, soy Jarvis, tu asistente de inteligencia artificial. ¿En qué puedo ayudarte hoy?"
@@ -285,7 +290,7 @@ if root_agent:
             await asyncio.gather(*done, *pending, return_exceptions=True)
             logger.info(f"Tareas principales para CallSid: {call_sid} finalizadas o canceladas.")
         except ValueError as e: 
-            if "Session not found" in str(e) or "Error al crear la sesión ADK" in str(e): # Este último es de nuestra propia lógica de creación
+            if "Session not found" in str(e) or "Error al crear la sesión ADK" in str(e):
                 logger.error(f"Fallo crítico al iniciar la sesión ADK para CallSid {call_sid}: {e}", exc_info=True)
             else:
                 logger.error(f"ValueError en `websocket_audio_endpoint` para CallSid: {call_sid}: {e}", exc_info=True)
@@ -306,7 +311,7 @@ if root_agent:
             logger.info(f"Finalizado `websocket_audio_endpoint` para CallSid: {call_sid}")
 
 @app.get("/", response_class=PlainTextResponse)
-async def read_root(): return "Servidor del agente de voz Gemini-Twilio (RunConfig Simplificado) activo."
+async def read_root(): return "Servidor del agente de voz Gemini-Twilio (Enum Modalities) activo."
 
 @app.get("/_ah/health", response_class=PlainTextResponse)
 async def health_check(): return "OK"
