@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN FINAL Y CORRECTA: Basada en la definición de RunConfig del ADK.
+# VERSIÓN FINAL: Corregida para construir SpeechConfig y VoiceConfig correctamente.
 
 import os
 import json
@@ -86,17 +86,20 @@ if root_agent:
         session = session_service.create_session(app_name=APP_NAME, user_id=session_id, session_id=session_id)
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
-        # --- CONFIGURACIÓN FINAL Y CORRECTA BASADA EN EL CÓDIGO FUENTE DE RunConfig ---
-        # 1. Se crea un `SpeechConfig` para definir el formato del audio de SALIDA (la voz de Gemini).
-        #    Es crucial especificar `audio_encoding` y `sample_rate_hertz` para que sea compatible con Twilio.
-        speech_config = generativelanguage_types.SpeechConfig(
+        # --- CONFIGURACIÓN FINAL Y CORRECTA PARA EVITAR EL 'ValidationError' ---
+        # 1. Se crea un `VoiceConfig` para especificar el formato del audio de SALIDA (la voz de Gemini).
+        #    Esto es lo que Pydantic espera, y es crucial para la compatibilidad con Twilio.
+        voice_config = generativelanguage_types.VoiceConfig(
             audio_encoding="MULAW",
             sample_rate_hertz=8000
         )
         
-        # 2. Se construye el `RunConfig` usando los campos que realmente existen:
-        #    - `speech_config`: Para la salida de audio.
-        #    - `input_audio_transcription`: Para habilitar la ENTRADA de audio.
+        # 2. Se crea un `SpeechConfig` que envuelve al `VoiceConfig`.
+        speech_config = generativelanguage_types.SpeechConfig(
+            voice_config=voice_config
+        )
+        
+        # 3. Se construye el `RunConfig` usando los campos que realmente existen.
         run_config = RunConfig(
             response_modalities=["AUDIO", "TEXT"],
             speech_config=speech_config,
@@ -105,7 +108,7 @@ if root_agent:
         
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados con la configuración correcta de SpeechConfig y AudioTranscriptionConfig.")
+        logger.info("Sesión ADK y runner iniciados con la estructura de configuración correcta.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
