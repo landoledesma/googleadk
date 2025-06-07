@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN FINAL Y CORRECTA: Implementa la transcodificación de audio en tiempo real.
+# VERSIÓN FINAL Y CORRECTA: Corrige el ValidationError y el RuntimeWarning.
 
 import os
 import json
@@ -82,30 +82,33 @@ if root_agent:
             logger.error(f"Error en /voice: {e}", exc_info=True)
             return PlainTextResponse("<Response><Say>Error al procesar la llamada.</Say></Response>", status_code=500, media_type="application/xml")
 
-    def start_agent_session(session_id: str):
+    # --- CORRECCIÓN DE RUNTIMEWARNING: La función debe ser async ---
+    async def start_agent_session(session_id: str):
         logger.info(f"Iniciando sesión ADK para: {session_id}")
-        session = session_service.create_session(app_name=APP_NAME, user_id=session_id, session_id=session_id)
+        
+        # --- CORRECCIÓN DE RUNTIMEWARNING: Se añade 'await' ---
+        session = await session_service.create_session(
+            app_name=APP_NAME, user_id=session_id, session_id=session_id
+        )
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
-        # --- CONFIGURACIÓN FINAL Y CORRECTA ---
-        # 1. Se crea un `SpeechConfig` para solicitar a Gemini que genere audio.
-        #    Usamos una voz pre-construida. Gemini nos enviará audio PCM de alta calidad (24kHz).
+        # Se crea un `SpeechConfig` para solicitar a Gemini que genere audio.
         speech_config = generativelanguage_types.SpeechConfig(
             voice_config=generativelanguage_types.VoiceConfig(
                 prebuilt_voice_config=generativelanguage_types.PrebuiltVoiceConfig(voice_name="Puck")
             )
         )
         
-        # 2. Se construye el `RunConfig` para habilitar entrada y salida de audio.
+        # --- CORRECCIÓN DE VALIDATIONERROR: Se crea un objeto vacío ---
         run_config = RunConfig(
             response_modalities=["AUDIO", "TEXT"],
             speech_config=speech_config,
-            input_audio_transcription=generativelanguage_types.AudioTranscriptionConfig(enable=True)
+            input_audio_transcription=generativelanguage_types.AudioTranscriptionConfig()
         )
         
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados. Preparado para transcodificar audio.")
+        logger.info("Sesión ADK y runner iniciados con la configuración correcta.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
@@ -113,25 +116,11 @@ if root_agent:
             async for event in live_events:
                 if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
                     if event.output_data and event.output_data.audio_data:
-                        # --- ¡TRANSCODIFICACIÓN DE AUDIO EN TIEMPO REAL! ---
-                        
-                        # 1. Audio de Gemini (PCM, 24kHz, 1 canal, 16-bit)
                         gemini_audio_chunk = event.output_data.audio_data.data
-                        
-                        # 2. Cargar el audio PCM en pydub
-                        audio_segment = AudioSegment(
-                            data=gemini_audio_chunk,
-                            sample_width=2,  # 16-bit = 2 bytes
-                            frame_rate=24000,
-                            channels=1
-                        )
-                        
-                        # 3. Exportar a formato MULAW 8kHz
+                        audio_segment = AudioSegment(data=gemini_audio_chunk, sample_width=2, frame_rate=24000, channels=1)
                         buffer = io.BytesIO()
                         audio_segment.export(buffer, format="mulaw", frame_rate=8000)
                         twilio_audio_chunk = buffer.getvalue()
-                        
-                        # 4. Enviar el audio transcodificado a Twilio
                         payload = base64.b64encode(twilio_audio_chunk).decode("utf-8")
                         stream_sid = active_streams_sids.get(call_sid)
                         if stream_sid:
@@ -167,7 +156,9 @@ if root_agent:
         await websocket.accept()
         logger.info(f"🔗 WebSocket aceptado para {call_sid}")
         try:
-            live_events, live_request_queue = start_agent_session(call_sid)
+            # --- CORRECCIÓN DE RUNTIMEWARNING: Se añade 'await' a la llamada ---
+            live_events, live_request_queue = await start_agent_session(call_sid)
+            
             twilio_task = asyncio.create_task(process_twilio_audio(websocket, call_sid, live_request_queue))
             gemini_task = asyncio.create_task(process_gemini_responses(websocket, call_sid, live_events))
             await asyncio.gather(twilio_task, gemini_task)
