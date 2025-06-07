@@ -1,12 +1,11 @@
 # main.py
-# VERSIÓN FINAL: Usa un RunConfig simple para el modelo de audio nativo.
+# VERSIÓN FINAL: Simplificada al máximo para confiar en el modelo de audio nativo.
 
 import os
 import json
 import base64
 import asyncio
 import logging
-import io
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
@@ -14,19 +13,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.websockets import WebSocketState
 from dotenv import load_dotenv
 
-# ================================================
-# --- SDK de Google, ADK y Librerías ---
-# ================================================
 from google.genai import types as generativelanguage_types
 from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.agents import LiveRequestQueue
 from google.adk.runners import Runner
-
-# Twilio
 from twilio.twiml.voice_response import VoiceResponse, Start
 
-# Agente Jarvis
+# Agente Jarvis (Asegúrate de que la ruta sea correcta)
 try:
     from app.jarvis.agent import root_agent
 except ImportError:
@@ -36,9 +30,6 @@ except ImportError:
         root_agent = None
         logging.error("No se pudo importar root_agent. La funcionalidad de voz no funcionará.")
 
-# ================================================
-# 0. Configuración de Logging y Entorno
-# ================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -55,9 +46,6 @@ session_service = InMemorySessionService()
 app = FastAPI(title=APP_NAME, version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# ================================================
-# SECCIÓN DE VOZ CON TWILIO Y GEMINI ADK
-# ================================================
 active_streams_sids = {}
 
 if root_agent:
@@ -74,8 +62,7 @@ if root_agent:
             websocket_url = f"wss://{SERVER_BASE_URL.replace('https://', '')}/stream/{call_sid}"
             start = Start()
             start.stream(url=websocket_url)
-            response.append(start)
-            response.say("Conectando con el asistente. Un momento.", language="es-ES")
+            # El agente saludará, no es necesario un mensaje aquí.
             return PlainTextResponse(str(response), media_type="application/xml")
         except Exception as e:
             logger.error(f"Error en /voice: {e}", exc_info=True)
@@ -88,29 +75,26 @@ if root_agent:
         )
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
-        # --- CONFIGURACIÓN SIMPLIFICADA PARA UN MODELO DE AUDIO NATIVO ---
-        # Como ahora usamos un modelo especializado (ej. gemini-2.5-flash-preview-native-audio-dialog),
-        # ya no necesitamos un 'SpeechConfig' complejo. El modelo ya sabe cómo manejar audio.
-        # Simplemente habilitamos la transcripción de entrada y definimos las modalidades.
-        # Esto evita el `ValidationError` porque no creamos un objeto inválido.
+        # --- CONFIGURACIÓN FINAL Y SIMPLIFICADA ---
+        # Al usar un modelo de audio nativo, no necesitamos especificar NINGUNA configuración de audio.
+        # El modelo ya sabe que debe aceptar y generar audio.
+        # Simplemente pedimos las modalidades de respuesta.
+        # Esto evita enviar un "argumento inválido" al backend de Google.
         run_config = RunConfig(
-            response_modalities=["AUDIO", "TEXT"],
-            input_audio_transcription=generativelanguage_types.AudioTranscriptionConfig()
+            response_modalities=["AUDIO", "TEXT"]
         )
         
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados con configuración para modelo de audio nativo.")
+        logger.info("Sesión ADK y runner iniciados para modelo de audio nativo.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
         try:
             async for event in live_events:
                 if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
-                    # El modelo de audio nativo probablemente devuelva audio en un formato
-                    # directamente compatible o de alta calidad. Asumimos que es MULAW por ahora.
-                    # Si el audio suena mal, aquí es donde ajustaríamos la transcodificación.
                     if event.output_data and event.output_data.audio_data:
+                        # El modelo de audio nativo debería devolver el audio en el formato correcto (MULAW).
                         twilio_audio_chunk = event.output_data.audio_data.data
                         payload = base64.b64encode(twilio_audio_chunk).decode("utf-8")
                         stream_sid = active_streams_sids.get(call_sid)
@@ -119,6 +103,8 @@ if root_agent:
                 elif event.type == generativelanguage_types.LiveEventType.SESSION_ENDED:
                     logger.info(f"Sesión ADK finalizada para {call_sid}.")
                     break
+        except websockets.exceptions.ConnectionClosedError as e:
+            logger.info(f"Conexión con el backend de Gemini cerrada (normal al colgar): {e}")
         except Exception as e:
             logger.error(f"Error en process_gemini_responses: {e}", exc_info=True)
 
