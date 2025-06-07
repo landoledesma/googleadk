@@ -1,13 +1,12 @@
 # main.py
-# VERSIÓN FINAL: Corrige el `RunConfig` final y un `NameError`.
+# VERSIÓN FINAL: Usa el modelo y la configuración recomendados por la documentación del ADK.
 
 import os
 import json
 import base64
 import asyncio
 import logging
-import io
-import websockets # <-- CORRECCIÓN: Se importa el módulo para manejar excepciones
+import websockets
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
@@ -17,8 +16,6 @@ from dotenv import load_dotenv
 
 from google.genai import types as generativelanguage_types
 from google.adk.agents.run_config import RunConfig
-# --- CORRECCIÓN: Importamos la enumeración de Modalidad ---
-from google.adk.models.generated import Modality
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.agents import LiveRequestQueue
 from google.adk.runners import Runner
@@ -82,18 +79,16 @@ if root_agent:
         )
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
-        # --- CONFIGURACIÓN FINAL: LA MÁS SIMPLE Y LÓGICA ---
-        # 1. Usamos la enumeración `Modality` para evitar las advertencias de Pydantic.
-        # 2. Habilitamos `input_audio_transcription` para decirle al ADK que escuche.
-        # 3. NO especificamos `speech_config` para no entrar en conflicto con el modelo de audio nativo.
+        # --- CONFIGURACIÓN FINAL: LA MÁS SIMPLE POSIBLE, COMO EN LA DOCU DEL ADK ---
+        # Confiamos en que el ADK, al ver el modelo 'gemini-2.0-flash-exp',
+        # configurará el streaming de audio internamente.
         run_config = RunConfig(
-            response_modalities=[Modality.AUDIO, Modality.TEXT],
-            input_audio_transcription=generativelanguage_types.AudioTranscriptionConfig()
+            response_modalities=["AUDIO", "TEXT"]
         )
         
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados correctamente.")
+        logger.info("Sesión ADK y runner iniciados con configuración mínima recomendada.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
@@ -101,6 +96,7 @@ if root_agent:
             async for event in live_events:
                 if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
                     if event.output_data and event.output_data.audio_data:
+                        # El modelo debe devolver audio MULAW o algo compatible
                         twilio_audio_chunk = event.output_data.audio_data.data
                         payload = base64.b64encode(twilio_audio_chunk).decode("utf-8")
                         stream_sid = active_streams_sids.get(call_sid)
@@ -109,7 +105,6 @@ if root_agent:
                 elif event.type == generativelanguage_types.LiveEventType.SESSION_ENDED:
                     logger.info(f"Sesión ADK finalizada para {call_sid}.")
                     break
-        # --- CORRECCIÓN: Se usa `websockets` (importado) para capturar la excepción ---
         except websockets.exceptions.ConnectionClosedError as e:
             logger.info(f"Conexión con el backend de Gemini cerrada (normal al colgar): {e}")
         except Exception as e:
@@ -124,6 +119,8 @@ if root_agent:
                     active_streams_sids[call_sid] = message_json.get("start", {}).get("streamSid")
                 elif event_type == "media":
                     if live_request_queue:
+                        # Enviamos el audio MULAW de Twilio directamente.
+                        # El ADK y el modelo 'exp' deberían poder manejarlo.
                         blob_data = generativelanguage_types.Blob(data=base64.b64decode(message_json["media"]["payload"]), mime_type="audio/x-mulaw")
                         live_request_queue.send_realtime(blob_data)
                 elif event_type == "stop":
