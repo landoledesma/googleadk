@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.websockets import WebSocketState
 from dotenv import load_dotenv
 
-from typing import AsyncIterable, List # Añadir List para la pista de tipo de modalities
+from typing import AsyncIterable, List, Optional # Añadido Optional para speech_synthesis_config
 
 from google.adk.events.event import Event
 from google.genai import types as generativelanguage_types
@@ -67,7 +67,6 @@ active_streams_sids = {}
 if root_agent:
     @app.post("/voice", response_class=PlainTextResponse)
     async def voice_webhook(request: Request):
-        # ... (código sin cambios) ...
         try:
             form = await request.form()
             call_sid = form.get("CallSid")
@@ -105,31 +104,24 @@ if root_agent:
             app_name=APP_NAME, agent=root_agent, session_service=session_service
         )
         
-        ########## RunConfig con Enums y SpeechConfig Básico ##########
         active_modalities: List[generativelanguage_types.Modality] = []
         speech_synthesis_config: Optional[generativelanguage_types.SpeechConfig] = None
 
-        if is_audio_mode: # Asumimos que si is_audio_mode es true, queremos respuesta de audio
+        if is_audio_mode:
             active_modalities.append(generativelanguage_types.Modality.AUDIO)
             speech_synthesis_config = generativelanguage_types.SpeechConfig(
-                language_code="es-ES"  # O el idioma que necesites para la salida de voz
+                language_code="es-ES"
             )
             logger.info(f"Modo audio activado. SpeechConfig: {speech_synthesis_config}")
         
-        # Siempre incluimos TEXTO para el saludo inicial y posibles mensajes de error del agente.
-        # Si la Prueba A (solo AUDIO) funciona y luego quieres reintroducir TEXTO para respuestas mixtas:
-        # active_modalities.append(generativelanguage_types.Modality.TEXT)
-
-        # Para la PRUEBA A (enfocada en arreglar el audio):
-        if not active_modalities: # Si por alguna razón is_audio_mode fuera False y no añadiéramos TEXTO
-             active_modalities.append(generativelanguage_types.Modality.TEXT) # Default a texto para que no esté vacío
+        if not active_modalities:
+             active_modalities.append(generativelanguage_types.Modality.TEXT)
 
         run_config = RunConfig(
             response_modalities=active_modalities,
             speech_config=speech_synthesis_config
         )
         logger.info(f"Usando RunConfig: {run_config}")
-        ########## FIN RunConfig ##########
         
         live_request_queue = LiveRequestQueue()
         
@@ -141,41 +133,74 @@ if root_agent:
         logger.info(f"Runner.run_live invocado para CallSid: {session_id_str} pasando objeto Session.")
         return live_events_generator, live_request_queue
 
+    # --- INICIO DEL CÓDIGO MODIFICADO ---
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events: AsyncIterable[Event]):
-        # ... (código sin cambios) ...
         logger.info(f"Iniciando `process_gemini_responses` para CallSid: {call_sid}")
         try:
             async for event in live_events:
                 if websocket.client_state == WebSocketState.DISCONNECTED:
                     logger.warning(f"WebSocket desconectado (Gemini->Twilio) para CallSid: {call_sid}. Terminando.")
                     break
-                if not hasattr(event, 'type'):
-                    logger.warning(f"Evento ADK sin 'type' para CallSid: {call_sid}. Evento: {event}")
-                    continue
-                if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
-                    if hasattr(event, 'output_data') and event.output_data and hasattr(event.output_data, 'audio_data') and event.output_data.audio_data:
-                        pcm_audio_from_gemini = event.output_data.audio_data.data
-                        logger.debug(f"Recibido chunk de audio PCM de Gemini ({len(pcm_audio_from_gemini)} bytes) para CallSid: {call_sid}")
-                        try:
-                            mulaw_audio_for_twilio = audioop.lin2ulaw(pcm_audio_from_gemini, 2)
-                        except audioop.error as e:
-                            logger.error(f"Error PCM->µ-law para CallSid: {call_sid}: {e}. Saltando.")
-                            continue
-                        payload_b64 = base64.b64encode(mulaw_audio_for_twilio).decode("utf-8")
-                        stream_sid = active_streams_sids.get(call_sid)
-                        if stream_sid:
-                            await websocket.send_json({"event": "media", "streamSid": stream_sid, "media": {"payload": payload_b64}})
-                        else:
-                            logger.warning(f"No stream_sid para CallSid: {call_sid} al enviar audio de Gemini.")
-                    if hasattr(event, 'output_data') and event.output_data and hasattr(event.output_data, 'text_data') and event.output_data.text_data:
-                        logger.info(f"Texto de Gemini para CallSid {call_sid}: {event.output_data.text_data.text}")
-                elif event.type == generativelanguage_types.LiveEventType.SESSION_ENDED:
-                    logger.info(f"Evento SESSION_ENDED de ADK para CallSid: {call_sid}.")
-                    break
-                elif event.type == generativelanguage_types.LiveEventType.ERROR:
-                    logger.error(f"Error en evento ADK para CallSid: {call_sid}: {getattr(event, 'error', 'Error desconocido')}")
-                    break
-        except websockets.exceptions.ConnectionClosedError as e:
+
+                # Por defecto, asumimos que no hay datos de audio o texto en este evento
+                audio_data_to_send = None
+                text_data_to_log = None
+
+                # Escenario 1: Evento con atributo 'type' (estructura esperada anteriormente)
+                if hasattr(event, 'type'):
+                    logger.debug(f"Evento ADK con 'type': {event.type} para CallSid: {call_sid}")
+                    if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
+                        if hasattr(event, 'output_data') and event.output_data:
+                            if hasattr(event.output_data, 'audio_data') and event.output_data.audio_data:
+                                pcm_audio_from_gemini = event.output_data.audio_data.data
+                                audio_data_to_send = pcm_audio_from_gemini
+                            if hasattr(event.output_data, 'text_data') and event.output_data.text_data:
+                                text_data_to_log = event.output_data.text_data.text
+                    elif event.type == generativelanguage_types.LiveEventType.SESSION_ENDED:
+                        logger.info(f"Evento SESSION_ENDED de ADK recibido para CallSid: {call_sid}.")
+                        break 
+                    elif event.type == generativelanguage_types.LiveEventType.ERROR:
+                        logger.error(f"Error en evento ADK para CallSid: {call_sid}: {getattr(event, 'error', 'Error desconocido')}")
+                        break
+                
+                # Escenario 2: Evento que contiene 'content' directamente (nuevo caso observado)
+                elif hasattr(event, 'content') and event.content and hasattr(event.content, 'parts') and event.content.parts:
+                    logger.debug(f"Evento ADK con 'content' directo para CallSid: {call_sid}")
+                    for part in event.content.parts:
+                        if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.mime_type and part.inline_data.mime_type.startswith("audio/"):
+                            pcm_audio_from_gemini = part.inline_data.data
+                            audio_data_to_send = pcm_audio_from_gemini
+                        if hasattr(part, 'text') and part.text:
+                            text_data_to_log = part.text
+                else:
+                    logger.warning(f"Evento ADK no reconocido o sin datos procesables para CallSid: {call_sid}. Evento: {event}")
+                    continue # Saltar al siguiente evento
+
+                # Procesar audio si se encontró
+                if audio_data_to_send:
+                    logger.debug(f"Procesando audio PCM de Gemini ({len(audio_data_to_send)} bytes) para CallSid: {call_sid}")
+                    try:
+                        # Asume que el audio de Gemini es PCM de 16-bit. La frecuencia de muestreo puede ser un problema (24kHz vs 8kHz).
+                        mulaw_audio_for_twilio = audioop.lin2ulaw(audio_data_to_send, 2)
+                        logger.debug(f"Audio PCM de Gemini convertido a µ-law ({len(mulaw_audio_for_twilio)} bytes) para CallSid: {call_sid}")
+                    except audioop.error as e:
+                        logger.error(f"Error al convertir PCM (Gemini) a µ-law (Twilio) para CallSid: {call_sid}: {e}. Saltando este chunk de audio.")
+                        continue 
+                    
+                    payload_b64 = base64.b64encode(mulaw_audio_for_twilio).decode("utf-8")
+                    stream_sid = active_streams_sids.get(call_sid)
+                    if stream_sid:
+                        media_message = {"event": "media", "streamSid": stream_sid, "media": {"payload": payload_b64}}
+                        await websocket.send_json(media_message)
+                        logger.debug(f"Enviado chunk de audio µ-law a Twilio para CallSid: {call_sid}")
+                    else:
+                        logger.warning(f"No se encontró stream_sid para CallSid: {call_sid} al intentar enviar audio de Gemini.")
+                
+                # Loguear texto si se encontró
+                if text_data_to_log:
+                    logger.info(f"Texto de Gemini para CallSid {call_sid}: {text_data_to_log}")
+
+        except websockets.exceptions.ConnectionClosed as e:
             logger.warning(f"Conexión WebSocket con ADK cerrada para CallSid: {call_sid}. Código: {e.code}, Razón: {e.reason}", exc_info=True)
         except asyncio.CancelledError:
             logger.info(f"`process_gemini_responses` cancelado para CallSid: {call_sid}")
@@ -188,10 +213,10 @@ if root_agent:
             logger.error(f"Error inesperado en `process_gemini_responses` para CallSid: {call_sid}: {e}", exc_info=True)
         finally:
             logger.info(f"Finalizando `process_gemini_responses` para CallSid: {call_sid}")
+    # --- FIN DEL CÓDIGO MODIFICADO ---
 
 
     async def process_twilio_audio(websocket: WebSocket, call_sid: str, live_request_queue: LiveRequestQueue):
-        # ... (código sin cambios) ...
         logger.info(f"Iniciando `process_twilio_audio` para CallSid: {call_sid}")
         queue_open_for_sending = True
         try:
@@ -267,7 +292,6 @@ if root_agent:
         live_request_queue: LiveRequestQueue = None
         queue_open_for_sending_ws_level = True
         try:
-            # Por defecto, is_audio_mode es True en start_agent_session
             live_events_generator, live_request_queue = await start_agent_session(call_sid) 
             
             initial_greeting_text = "Hola, soy Jarvis, tu asistente de inteligencia artificial. ¿En qué puedo ayudarte hoy?"
