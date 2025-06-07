@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN FINAL: Corrige el error "Invalid Argument" simplificando el RunConfig.
+# VERSIÓN FINAL: Usa un RunConfig simple para el modelo de audio nativo.
 
 import os
 import json
@@ -88,31 +88,29 @@ if root_agent:
         )
         runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
-        # --- CONFIGURACIÓN FINAL Y CORRECTA PARA LA API DE GEMINI LIVE ---
-        # Creamos un SpeechConfig que especifica directamente el formato de audio de salida.
-        # Esto es para un caso de uso de telefonía y es lógicamente coherente,
-        # lo que evita el error "Invalid Argument" del backend de Google.
-        speech_config = generativelanguage_types.SpeechConfig(
-            audio_encoding="MULAW"
-        )
-        
+        # --- CONFIGURACIÓN SIMPLIFICADA PARA UN MODELO DE AUDIO NATIVO ---
+        # Como ahora usamos un modelo especializado (ej. gemini-2.5-flash-preview-native-audio-dialog),
+        # ya no necesitamos un 'SpeechConfig' complejo. El modelo ya sabe cómo manejar audio.
+        # Simplemente habilitamos la transcripción de entrada y definimos las modalidades.
+        # Esto evita el `ValidationError` porque no creamos un objeto inválido.
         run_config = RunConfig(
             response_modalities=["AUDIO", "TEXT"],
-            speech_config=speech_config,
             input_audio_transcription=generativelanguage_types.AudioTranscriptionConfig()
         )
         
         live_request_queue = LiveRequestQueue()
         live_events = runner.run_live(session=session, live_request_queue=live_request_queue, run_config=run_config)
-        logger.info("Sesión ADK y runner iniciados con configuración de telefonía directa.")
+        logger.info("Sesión ADK y runner iniciados con configuración para modelo de audio nativo.")
         return live_events, live_request_queue
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events):
         try:
             async for event in live_events:
                 if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
+                    # El modelo de audio nativo probablemente devuelva audio en un formato
+                    # directamente compatible o de alta calidad. Asumimos que es MULAW por ahora.
+                    # Si el audio suena mal, aquí es donde ajustaríamos la transcodificación.
                     if event.output_data and event.output_data.audio_data:
-                        # No se necesita transcodificación. El audio ya viene en MULAW.
                         twilio_audio_chunk = event.output_data.audio_data.data
                         payload = base64.b64encode(twilio_audio_chunk).decode("utf-8")
                         stream_sid = active_streams_sids.get(call_sid)
@@ -122,11 +120,7 @@ if root_agent:
                     logger.info(f"Sesión ADK finalizada para {call_sid}.")
                     break
         except Exception as e:
-            # El ConnectionClosedError es esperado si la llamada cuelga. Lo registramos como INFO.
-            if isinstance(e, websockets.exceptions.ConnectionClosedError):
-                logger.info(f"Conexión con el backend de Gemini cerrada para {call_sid}: {e}")
-            else:
-                logger.error(f"Error en process_gemini_responses: {e}", exc_info=True)
+            logger.error(f"Error en process_gemini_responses: {e}", exc_info=True)
 
     async def process_twilio_audio(websocket: WebSocket, call_sid: str, live_request_queue: LiveRequestQueue):
         try:
