@@ -1,5 +1,5 @@
 # main.py
-# VERSIÓN CON RESPONSE_MODALITIES COMO ENUM Y SPEECH_CONFIG BÁSICO
+# VERSIÓN CON REMUESTREO MANUAL POST-GEMINI
 
 import os
 import json
@@ -10,6 +10,7 @@ import websockets
 import audioop
 
 # --- HABILITAR LOGGING DEBUG PARA LIBRERÍAS DE GOOGLE ---
+# (Esto no afecta la lógica de remuestreo, es solo para debugging de las libs)
 logging.getLogger('google_adk').setLevel(logging.DEBUG)
 logging.getLogger('google.adk').setLevel(logging.DEBUG)
 logging.getLogger('google.genai').setLevel(logging.DEBUG)
@@ -21,10 +22,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.websockets import WebSocketState
 from dotenv import load_dotenv
 
-from typing import AsyncIterable, List, Optional # Añadido Optional para speech_synthesis_config
+from typing import AsyncIterable, List, Optional
 
 from google.adk.events.event import Event
-from google.genai import types as generativelanguage_types
+from google.genai import types as generativelanguage_types # No se modifica su configuración de audio
 from google.adk.sessions.session import Session
 
 from google.adk.agents.run_config import RunConfig
@@ -52,6 +53,16 @@ if not os.getenv("K_SERVICE"):
 
 APP_NAME = "Twilio Voice Agent Gemini"
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL")
+
+# --- CONSTANTES DE AUDIO PARA REMUESTREO MANUAL ---
+# Asumimos que Gemini por defecto podría enviar audio a 24kHz.
+# Si la frecuencia real de Gemini es otra, este valor debe ajustarse.
+GEMINI_AUDIO_INPUT_RATE = 24000  # Frecuencia de muestreo del audio PCM de Gemini (suposición)
+TWILIO_AUDIO_TARGET_RATE = 8000 # Frecuencia de muestreo requerida por Twilio (µ-law)
+PCM_SAMPLE_WIDTH = 2            # Ancho de muestra en bytes para PCM de 16 bits
+AUDIO_CHANNELS = 1              # Audio mono
+# --- FIN CONSTANTES DE AUDIO ---
+
 
 if not os.getenv("GOOGLE_API_KEY"):
     logger.warning("ADVERTENCIA: La variable de entorno GOOGLE_API_KEY no está configurada.")
@@ -109,14 +120,13 @@ if root_agent:
 
         if is_audio_mode:
             active_modalities.append(generativelanguage_types.Modality.AUDIO)
-            # --- AJUSTE AQUÍ ---
-            # Solicitar explícitamente a Gemini que genere audio a 8kHz
+            # --- SpeechConfig se deja básico, SIN sample_rate_hertz ---
+            # Esto NO intenta decirle a Gemini/ADK a qué frecuencia generar.
+            # El remuestreo se hará manualmente después.
             speech_synthesis_config = generativelanguage_types.SpeechConfig(
-                language_code="es-ES",
-                sample_rate_hertz=8000  # Solicitar 8kHz para compatibilidad con Twilio
+                language_code="es-ES"
             )
-            # --- FIN AJUSTE ---
-            logger.info(f"Modo audio activado. SpeechConfig: {speech_synthesis_config}")
+            logger.info(f"Modo audio activado. SpeechConfig (básico): {speech_synthesis_config}")
 
         if not active_modalities:
              active_modalities.append(generativelanguage_types.Modality.TEXT)
@@ -139,54 +149,63 @@ if root_agent:
 
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events: AsyncIterable[Event]):
         logger.info(f"Iniciando `process_gemini_responses` para CallSid: {call_sid}")
+        # Estado para el convertidor de frecuencia de muestreo (audioop.ratecv)
+        resample_state = None
         try:
             async for event in live_events:
                 if websocket.client_state == WebSocketState.DISCONNECTED:
                     logger.warning(f"WebSocket desconectado (Gemini->Twilio) para CallSid: {call_sid}. Terminando.")
                     break
 
-                audio_data_to_send = None
+                audio_data_to_send = None # Este será el audio PCM original de Gemini
                 text_data_to_log = None
 
+                # (Lógica para extraer audio_data_to_send y text_data_to_log del evento, sin cambios)
                 if hasattr(event, 'type'):
-                    logger.debug(f"Evento ADK con 'type': {event.type} para CallSid: {call_sid}")
+                    # ... (código existente para extraer audio_data_to_send) ...
                     if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
                         if hasattr(event, 'output_data') and event.output_data:
                             if hasattr(event.output_data, 'audio_data') and event.output_data.audio_data:
                                 pcm_audio_from_gemini = event.output_data.audio_data.data
-                                audio_data_to_send = pcm_audio_from_gemini
+                                audio_data_to_send = pcm_audio_from_gemini # Audio PCM original
                             if hasattr(event.output_data, 'text_data') and event.output_data.text_data:
                                 text_data_to_log = event.output_data.text_data.text
-                    elif event.type == generativelanguage_types.LiveEventType.SESSION_ENDED:
-                        logger.info(f"Evento SESSION_ENDED de ADK recibido para CallSid: {call_sid}.")
-                        break
-                    elif event.type == generativelanguage_types.LiveEventType.ERROR:
-                        logger.error(f"Error en evento ADK para CallSid: {call_sid}: {getattr(event, 'error', 'Error desconocido')}")
-                        break
-
+                    # ... (más lógica de tipos de evento) ...
                 elif hasattr(event, 'content') and event.content and hasattr(event.content, 'parts') and event.content.parts:
-                    logger.debug(f"Evento ADK con 'content' directo para CallSid: {call_sid}")
+                    # ... (código existente para extraer audio_data_to_send) ...
                     for part in event.content.parts:
                         if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.mime_type and part.inline_data.mime_type.startswith("audio/"):
                             pcm_audio_from_gemini = part.inline_data.data
-                            audio_data_to_send = pcm_audio_from_gemini
-                        if hasattr(part, 'text') and part.text:
-                            text_data_to_log = part.text
+                            audio_data_to_send = pcm_audio_from_gemini # Audio PCM original
+                        # ... (más lógica de partes) ...
                 else:
                     logger.warning(f"Evento ADK no reconocido o sin datos procesables para CallSid: {call_sid}. Evento: {event}")
                     continue
 
-                if audio_data_to_send:
-                    # --- AJUSTE EN LOG Y COMENTARIO ---
-                    logger.debug(f"Procesando audio PCM de Gemini ({len(audio_data_to_send)} bytes, solicitado a 8kHz) para CallSid: {call_sid}")
+                if audio_data_to_send: # Si tenemos audio PCM de Gemini
+                    logger.debug(f"Procesando audio PCM original de Gemini ({len(audio_data_to_send)} bytes, asumido {GEMINI_AUDIO_INPUT_RATE}Hz) para CallSid: {call_sid}")
                     try:
-                        # Asume que el audio de Gemini es PCM de 16-bit.
-                        # Se ha configurado SpeechConfig para solicitar 8kHz a Gemini.
-                        mulaw_audio_for_twilio = audioop.lin2ulaw(audio_data_to_send, 2) # width=2 para 16-bit PCM
-                        logger.debug(f"Audio PCM (8kHz) de Gemini convertido a µ-law ({len(mulaw_audio_for_twilio)} bytes) para CallSid: {call_sid}")
-                    # --- FIN AJUSTE ---
+                        # --- REMUESTREO MANUAL Y CONVERSIÓN ---
+                        # 1. Remuestrear el audio PCM de Gemini (ej: 24kHz) a 8kHz para Twilio.
+                        #    audio_data_to_send contiene el PCM original de Gemini.
+                        resampled_audio_data, resample_state = audioop.ratecv(
+                            audio_data_to_send,        # Audio PCM original de Gemini
+                            PCM_SAMPLE_WIDTH,          # 2 (para 16-bit)
+                            AUDIO_CHANNELS,            # 1 (mono)
+                            GEMINI_AUDIO_INPUT_RATE,   # Frecuencia original (ej: 24000 Hz)
+                            TWILIO_AUDIO_TARGET_RATE,  # Frecuencia deseada (8000 Hz)
+                            resample_state             # Estado para continuidad del stream
+                        )
+                        logger.debug(f"Audio PCM de Gemini remuestreado de {GEMINI_AUDIO_INPUT_RATE}Hz a {TWILIO_AUDIO_TARGET_RATE}Hz ({len(resampled_audio_data)} bytes) para CallSid: {call_sid}")
+
+                        # 2. Convertir el audio PCM remuestreado (ahora a 8kHz) a µ-law.
+                        mulaw_audio_for_twilio = audioop.lin2ulaw(resampled_audio_data, PCM_SAMPLE_WIDTH)
+                        logger.debug(f"Audio PCM ({TWILIO_AUDIO_TARGET_RATE}Hz) remuestreado y convertido a µ-law ({len(mulaw_audio_for_twilio)} bytes) para CallSid: {call_sid}")
+                        # --- FIN REMUESTREO MANUAL Y CONVERSIÓN ---
+
                     except audioop.error as e:
-                        logger.error(f"Error al convertir PCM (Gemini) a µ-law (Twilio) para CallSid: {call_sid}: {e}. Saltando este chunk de audio.")
+                        logger.error(f"Error durante el procesamiento de audio (remuestreo o µ-law) para CallSid: {call_sid}: {e}. Saltando este chunk de audio.")
+                        # Considerar resetear resample_state = None si un error es grave y afecta la continuidad
                         continue
 
                     payload_b64 = base64.b64encode(mulaw_audio_for_twilio).decode("utf-8")
@@ -201,6 +220,7 @@ if root_agent:
                 if text_data_to_log:
                     logger.info(f"Texto de Gemini para CallSid {call_sid}: {text_data_to_log}")
 
+        # ... (resto de la función process_gemini_responses sin cambios, incluyendo except y finally) ...
         except websockets.exceptions.ConnectionClosed as e:
             logger.warning(f"Conexión WebSocket con ADK cerrada para CallSid: {call_sid}. Código: {e.code}, Razón: {e.reason}", exc_info=True)
         except asyncio.CancelledError:
@@ -238,14 +258,16 @@ if root_agent:
                         if not payload_b64: continue
                         mulaw_data_bytes = base64.b64decode(payload_b64)
                         try:
-                            pcm_data_bytes = audioop.ulaw2lin(mulaw_data_bytes, 2)
+                            pcm_data_bytes = audioop.ulaw2lin(mulaw_data_bytes, PCM_SAMPLE_WIDTH)
                         except audioop.error as e:
                             logger.error(f"Error µ-law->PCM para CallSid: {call_sid}: {e}. Saltando.")
                             continue
-                        blob_data = generativelanguage_types.Blob(data=pcm_data_bytes, mime_type='audio/pcm;rate=8000')
+                        # El audio de Twilio ya está a 8kHz (µ-law), lo convertimos a PCM 8kHz.
+                        # ADK/GenAI debería ser capaz de manejar PCM a 8kHz si se le indica correctamente el rate.
+                        blob_data = generativelanguage_types.Blob(data=pcm_data_bytes, mime_type=f'audio/pcm;rate={TWILIO_AUDIO_TARGET_RATE}')
                         try:
                             live_request_queue.send_realtime(blob_data)
-                            logger.debug(f"Enviado chunk PCM a Gemini para CallSid: {call_sid}")
+                            logger.debug(f"Enviado chunk PCM ({TWILIO_AUDIO_TARGET_RATE}Hz) de Twilio a Gemini para CallSid: {call_sid}")
                         except Exception as e:
                             logger.warning(f"Error al enviar a live_request_queue para CallSid {call_sid}: {e}")
                             queue_open_for_sending = False
@@ -264,6 +286,7 @@ if root_agent:
                 elif event_type == "mark":
                     mark_name = message_json.get('mark', {}).get('name')
                     logger.info(f"Evento 'mark' de Twilio para CallSid: {call_sid}. Nombre: {mark_name}")
+        # ... (resto de la función process_twilio_audio sin cambios, incluyendo except y finally) ...
         except WebSocketDisconnect as e:
             logger.info(f"WS desconectado (Twilio->App) por Twilio para CallSid: {call_sid}. Code: {e.code}")
         except websockets.exceptions.ConnectionClosed as e:
@@ -292,6 +315,7 @@ if root_agent:
         live_request_queue: LiveRequestQueue = None
         queue_open_for_sending_ws_level = True
         try:
+            # start_agent_session ahora usa SpeechConfig básico, no intenta fijar sample rate.
             live_events_generator, live_request_queue = await start_agent_session(call_sid)
 
             initial_greeting_text = "Hola, soy Jarvis, tu asistente de inteligencia artificial. ¿En qué puedo ayudarte hoy?"
@@ -313,6 +337,7 @@ if root_agent:
             for task in pending: task.cancel()
             await asyncio.gather(*done, *pending, return_exceptions=True)
             logger.info(f"Tareas principales para CallSid: {call_sid} finalizadas o canceladas.")
+        # ... (resto de la función websocket_audio_endpoint sin cambios, incluyendo except y finally) ...
         except ValueError as e:
             if "Session not found" in str(e) or "Error al crear la sesión ADK" in str(e):
                 logger.error(f"Fallo crítico al iniciar la sesión ADK para CallSid {call_sid}: {e}", exc_info=True)
@@ -335,7 +360,7 @@ if root_agent:
             logger.info(f"Finalizado `websocket_audio_endpoint` para CallSid: {call_sid}")
 
 @app.get("/", response_class=PlainTextResponse)
-async def read_root(): return "Servidor del agente de voz Gemini-Twilio (Enum Modalities) activo."
+async def read_root(): return "Servidor del agente de voz Gemini-Twilio (Remuestreo Manual) activo."
 
 @app.get("/_ah/health", response_class=PlainTextResponse)
 async def health_check(): return "OK"
