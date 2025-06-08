@@ -124,7 +124,7 @@ if root_agent:
             # Esto NO intenta decirle a Gemini/ADK a qué frecuencia generar.
             # El remuestreo se hará manualmente después.
             speech_synthesis_config = generativelanguage_types.SpeechConfig(
-                language_code="es-ES"
+                
             )
             logger.info(f"Modo audio activado. SpeechConfig (básico): {speech_synthesis_config}")
 
