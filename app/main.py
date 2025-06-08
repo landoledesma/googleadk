@@ -25,7 +25,7 @@ from typing import AsyncIterable, List, Optional # Añadido Optional para speech
 
 from google.adk.events.event import Event
 from google.genai import types as generativelanguage_types
-from google.adk.sessions.session import Session 
+from google.adk.sessions.session import Session
 
 from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
@@ -94,7 +94,7 @@ if root_agent:
 
     async def start_agent_session(session_id_str: str, is_audio_mode: bool = True):
         logger.info(f"Iniciando y creando sesión ADK para CallSid: {session_id_str}, Audio Mode: {is_audio_mode}")
-        
+
         session_obj: Session = await session_service.create_session(
             app_name=APP_NAME, user_id=session_id_str, session_id=session_id_str
         )
@@ -103,17 +103,21 @@ if root_agent:
         runner = Runner(
             app_name=APP_NAME, agent=root_agent, session_service=session_service
         )
-        
+
         active_modalities: List[generativelanguage_types.Modality] = []
         speech_synthesis_config: Optional[generativelanguage_types.SpeechConfig] = None
 
         if is_audio_mode:
             active_modalities.append(generativelanguage_types.Modality.AUDIO)
+            # --- AJUSTE AQUÍ ---
+            # Solicitar explícitamente a Gemini que genere audio a 8kHz
             speech_synthesis_config = generativelanguage_types.SpeechConfig(
-                language_code="es-ES"
+                language_code="es-ES",
+                sample_rate_hertz=8000  # Solicitar 8kHz para compatibilidad con Twilio
             )
+            # --- FIN AJUSTE ---
             logger.info(f"Modo audio activado. SpeechConfig: {speech_synthesis_config}")
-        
+
         if not active_modalities:
              active_modalities.append(generativelanguage_types.Modality.TEXT)
 
@@ -122,9 +126,9 @@ if root_agent:
             speech_config=speech_synthesis_config
         )
         logger.info(f"Usando RunConfig: {run_config}")
-        
+
         live_request_queue = LiveRequestQueue()
-        
+
         live_events_generator = runner.run_live(
             session=session_obj,
             live_request_queue=live_request_queue,
@@ -133,7 +137,6 @@ if root_agent:
         logger.info(f"Runner.run_live invocado para CallSid: {session_id_str} pasando objeto Session.")
         return live_events_generator, live_request_queue
 
-    # --- INICIO DEL CÓDIGO MODIFICADO ---
     async def process_gemini_responses(websocket: WebSocket, call_sid: str, live_events: AsyncIterable[Event]):
         logger.info(f"Iniciando `process_gemini_responses` para CallSid: {call_sid}")
         try:
@@ -142,11 +145,9 @@ if root_agent:
                     logger.warning(f"WebSocket desconectado (Gemini->Twilio) para CallSid: {call_sid}. Terminando.")
                     break
 
-                # Por defecto, asumimos que no hay datos de audio o texto en este evento
                 audio_data_to_send = None
                 text_data_to_log = None
 
-                # Escenario 1: Evento con atributo 'type' (estructura esperada anteriormente)
                 if hasattr(event, 'type'):
                     logger.debug(f"Evento ADK con 'type': {event.type} para CallSid: {call_sid}")
                     if event.type == generativelanguage_types.LiveEventType.OUTPUT_DATA:
@@ -158,12 +159,11 @@ if root_agent:
                                 text_data_to_log = event.output_data.text_data.text
                     elif event.type == generativelanguage_types.LiveEventType.SESSION_ENDED:
                         logger.info(f"Evento SESSION_ENDED de ADK recibido para CallSid: {call_sid}.")
-                        break 
+                        break
                     elif event.type == generativelanguage_types.LiveEventType.ERROR:
                         logger.error(f"Error en evento ADK para CallSid: {call_sid}: {getattr(event, 'error', 'Error desconocido')}")
                         break
-                
-                # Escenario 2: Evento que contiene 'content' directamente (nuevo caso observado)
+
                 elif hasattr(event, 'content') and event.content and hasattr(event.content, 'parts') and event.content.parts:
                     logger.debug(f"Evento ADK con 'content' directo para CallSid: {call_sid}")
                     for part in event.content.parts:
@@ -174,19 +174,21 @@ if root_agent:
                             text_data_to_log = part.text
                 else:
                     logger.warning(f"Evento ADK no reconocido o sin datos procesables para CallSid: {call_sid}. Evento: {event}")
-                    continue # Saltar al siguiente evento
+                    continue
 
-                # Procesar audio si se encontró
                 if audio_data_to_send:
-                    logger.debug(f"Procesando audio PCM de Gemini ({len(audio_data_to_send)} bytes) para CallSid: {call_sid}")
+                    # --- AJUSTE EN LOG Y COMENTARIO ---
+                    logger.debug(f"Procesando audio PCM de Gemini ({len(audio_data_to_send)} bytes, solicitado a 8kHz) para CallSid: {call_sid}")
                     try:
-                        # Asume que el audio de Gemini es PCM de 16-bit. La frecuencia de muestreo puede ser un problema (24kHz vs 8kHz).
-                        mulaw_audio_for_twilio = audioop.lin2ulaw(audio_data_to_send, 2)
-                        logger.debug(f"Audio PCM de Gemini convertido a µ-law ({len(mulaw_audio_for_twilio)} bytes) para CallSid: {call_sid}")
+                        # Asume que el audio de Gemini es PCM de 16-bit.
+                        # Se ha configurado SpeechConfig para solicitar 8kHz a Gemini.
+                        mulaw_audio_for_twilio = audioop.lin2ulaw(audio_data_to_send, 2) # width=2 para 16-bit PCM
+                        logger.debug(f"Audio PCM (8kHz) de Gemini convertido a µ-law ({len(mulaw_audio_for_twilio)} bytes) para CallSid: {call_sid}")
+                    # --- FIN AJUSTE ---
                     except audioop.error as e:
                         logger.error(f"Error al convertir PCM (Gemini) a µ-law (Twilio) para CallSid: {call_sid}: {e}. Saltando este chunk de audio.")
-                        continue 
-                    
+                        continue
+
                     payload_b64 = base64.b64encode(mulaw_audio_for_twilio).decode("utf-8")
                     stream_sid = active_streams_sids.get(call_sid)
                     if stream_sid:
@@ -195,8 +197,7 @@ if root_agent:
                         logger.debug(f"Enviado chunk de audio µ-law a Twilio para CallSid: {call_sid}")
                     else:
                         logger.warning(f"No se encontró stream_sid para CallSid: {call_sid} al intentar enviar audio de Gemini.")
-                
-                # Loguear texto si se encontró
+
                 if text_data_to_log:
                     logger.info(f"Texto de Gemini para CallSid {call_sid}: {text_data_to_log}")
 
@@ -204,7 +205,7 @@ if root_agent:
             logger.warning(f"Conexión WebSocket con ADK cerrada para CallSid: {call_sid}. Código: {e.code}, Razón: {e.reason}", exc_info=True)
         except asyncio.CancelledError:
             logger.info(f"`process_gemini_responses` cancelado para CallSid: {call_sid}")
-        except ValueError as e: 
+        except ValueError as e:
             if "Session not found" in str(e):
                 logger.error(f"Error de sesión en ADK (process_gemini_responses) para CallSid {call_sid}: {e}", exc_info=True)
             else:
@@ -213,7 +214,6 @@ if root_agent:
             logger.error(f"Error inesperado en `process_gemini_responses` para CallSid: {call_sid}: {e}", exc_info=True)
         finally:
             logger.info(f"Finalizando `process_gemini_responses` para CallSid: {call_sid}")
-    # --- FIN DEL CÓDIGO MODIFICADO ---
 
 
     async def process_twilio_audio(websocket: WebSocket, call_sid: str, live_request_queue: LiveRequestQueue):
@@ -233,7 +233,7 @@ if root_agent:
                     if stream_sid: active_streams_sids[call_sid] = stream_sid
                     logger.info(f"Evento 'start' Twilio. StreamSid: {stream_sid} para CallSid: {call_sid}")
                 elif event_type == "media":
-                    if queue_open_for_sending: 
+                    if queue_open_for_sending:
                         payload_b64 = message_json.get("media", {}).get("payload")
                         if not payload_b64: continue
                         mulaw_data_bytes = base64.b64decode(payload_b64)
@@ -246,20 +246,20 @@ if root_agent:
                         try:
                             live_request_queue.send_realtime(blob_data)
                             logger.debug(f"Enviado chunk PCM a Gemini para CallSid: {call_sid}")
-                        except Exception as e: 
+                        except Exception as e:
                             logger.warning(f"Error al enviar a live_request_queue para CallSid {call_sid}: {e}")
-                            queue_open_for_sending = False 
+                            queue_open_for_sending = False
                     else:
                         logger.debug(f"Audio de Twilio para CallSid: {call_sid}, pero cola ADK no se usa para enviar.")
                 elif event_type == "stop":
                     logger.info(f"Evento 'stop' de Twilio para CallSid: {call_sid}.")
                     if queue_open_for_sending:
                         try:
-                            live_request_queue.close() 
+                            live_request_queue.close()
                             logger.info(f"live_request_queue.close() llamado para CallSid: {call_sid}")
                         except Exception as e:
                             logger.warning(f"Error al llamar a live_request_queue.close() para CallSid {call_sid}: {e}")
-                        queue_open_for_sending = False 
+                        queue_open_for_sending = False
                     break
                 elif event_type == "mark":
                     mark_name = message_json.get('mark', {}).get('name')
@@ -276,7 +276,7 @@ if root_agent:
             logger.error(f"Error inesperado en `process_twilio_audio` para CallSid: {call_sid}: {e}", exc_info=True)
         finally:
             logger.info(f"Finalizando `process_twilio_audio` para CallSid: {call_sid}")
-            if queue_open_for_sending: 
+            if queue_open_for_sending:
                 try:
                     live_request_queue.close()
                     logger.info(f"Asegurando cierre de live_request_queue al final de `process_twilio_audio` para CallSid: {call_sid}")
@@ -292,8 +292,8 @@ if root_agent:
         live_request_queue: LiveRequestQueue = None
         queue_open_for_sending_ws_level = True
         try:
-            live_events_generator, live_request_queue = await start_agent_session(call_sid) 
-            
+            live_events_generator, live_request_queue = await start_agent_session(call_sid)
+
             initial_greeting_text = "Hola, soy Jarvis, tu asistente de inteligencia artificial. ¿En qué puedo ayudarte hoy?"
             logger.info(f"Enviando saludo inicial '{initial_greeting_text}' a Gemini para CallSid: {call_sid}")
             initial_content = generativelanguage_types.Content(parts=[generativelanguage_types.Part(text=initial_greeting_text)])
@@ -313,7 +313,7 @@ if root_agent:
             for task in pending: task.cancel()
             await asyncio.gather(*done, *pending, return_exceptions=True)
             logger.info(f"Tareas principales para CallSid: {call_sid} finalizadas o canceladas.")
-        except ValueError as e: 
+        except ValueError as e:
             if "Session not found" in str(e) or "Error al crear la sesión ADK" in str(e):
                 logger.error(f"Fallo crítico al iniciar la sesión ADK para CallSid {call_sid}: {e}", exc_info=True)
             else:
@@ -326,7 +326,7 @@ if root_agent:
                 try:
                     live_request_queue.close()
                     logger.info(f"Cerrando live_request_queue (si no se hizo ya) al final de `websocket_audio_endpoint` para CallSid: {call_sid}")
-                except Exception as e: 
+                except Exception as e:
                     logger.warning(f"Error (esperado si ya cerrada) al cerrar live_request_queue en finally para CallSid {call_sid}: {e}")
             if call_sid in active_streams_sids: del active_streams_sids[call_sid]
             if websocket.client_state != WebSocketState.DISCONNECTED:
